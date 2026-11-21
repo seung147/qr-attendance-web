@@ -128,3 +128,5 @@ table.t tr:hover td{background:var(--soft)}
 .m-org img{height:26px;width:auto}
 .m-org span{border-left:1px solid var(--line);padding-left:10px;font-size:14px}
 .paper img,.qr-logo,.m-org img,.logo-chip img{max-width:100%}
+/* 한국어 줄바꿈: 단어(어절) 중간에서 끊지 않기 */
+body{word-break:keep-all;overflow-wrap:anywhere}

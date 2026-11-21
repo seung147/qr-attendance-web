@@ -21,6 +21,8 @@ const ORG = CFG.ORG || '대륜E&S';
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const app = document.getElementById('app');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const nobr = t => `<span style="display:inline-block">${t}</span>`;
+const fmtTitle = t => esc(t).replace(/\(([^)]*)\)/g, (m) => nobr(m));
 const pad = n => String(n).padStart(2,'0');
 const hms = t => { if(!t) return ''; const d=new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 const stamp = t => { const d=new Date(t); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
@@ -209,7 +211,7 @@ function mountList(){
 }
 
 function sessionForm(s){
-  const e=s||{course:'2026년 법정의무교육(성희롱·괴롭힘 예방)',round:'1회차',date:'',start:'10:00',end:'11:00',place:'본사 대회의실',lecturer:'',minMinutes:55,targetTeams:[],requireEmpNo:false};
+  const e=s||{course:'2026년 법정의무교육(성희롱·괴롭힘 예방교육)',round:'1회차',date:'',start:'10:00',end:'11:00',place:'본사 대회의실',lecturer:'',minMinutes:55,targetTeams:[],requireEmpNo:false};
   const bg=document.createElement('div'); bg.className='modal-bg';
   bg.innerHTML=`<form class="modal" id="sf"><h2 style="font-size:17px">${s?'회차 수정':'새 회차 만들기'}</h2>
   <label class="f">교육과정<input class="in" id="f_course" required value="${esc(e.course)}"></label>
@@ -343,7 +345,7 @@ function mountQR(sid){
     const s=getS(); if(!s) return;
     const m=summary(s), live=s.phase==='in'||s.phase==='out';
     document.getElementById('qmeta').textContent=`${s.date} ${s.start}~${s.end} · ${s.place}`;
-    document.getElementById('qtitle').textContent=`${s.course} ${s.round}`;
+    document.getElementById('qtitle').innerHTML=`${fmtTitle(s.course)} ${nobr(esc(s.round))}`;
     const pe=document.getElementById('qphase');
     pe.className='phase '+(s.phase==='in'?'ph-in':s.phase==='out'?'ph-out':'ph-idle');
     pe.textContent= s.phase==='in'?'입실 인증':s.phase==='out'?'퇴실 인증':s.phase==='closed'?'인증 마감':'인증 대기';

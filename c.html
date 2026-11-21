@@ -21,6 +21,9 @@ document.querySelector('.m-org img').alt = ORG;
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, { auth: { persistSession: false } });
 const mc = document.getElementById('mc');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// 제목: 괄호 묶음·회차는 한 덩어리로 줄바꿈
+const nobr = t => `<span style="display:inline-block">${t}</span>`;
+const fmtTitle = t => esc(t).replace(/\(([^)]*)\)/g, (m) => nobr(m));
 const pad = n => String(n).padStart(2,'0');
 const hms = t => { const d=new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 const store = { get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} } };
@@ -54,7 +57,7 @@ function draw(ctx){
   const s = ctx.session, isIn = ctx.phase === 'in', roster = ctx.roster, deadline = Date.now() + ctx.expires_in * 1000;
   const teams = [...new Set(roster.map(e => e.team))].sort((a,b) => a.localeCompare(b,'ko'));
   mc.innerHTML = `<span class="m-badge" style="background:${isIn?'var(--blue)':'var(--orange)'}">${isIn?'입실 인증':'퇴실 인증'}</span>
-   <h1>${esc(s.course)} ${esc(s.round)}</h1><div class="muted tnum">${esc(s.edu_date)} · ${esc(s.start_time)}~${esc(s.end_time)} · ${esc(s.place)}</div>
+   <h1>${fmtTitle(s.course)} ${nobr(esc(s.round))}</h1><div class="muted tnum">${esc(s.edu_date)} · ${esc(s.start_time)}~${esc(s.end_time)} · ${esc(s.place)}</div>
    <form id="mf" style="display:flex;flex-direction:column;gap:14px">
     <label class="f">팀이름<select class="in" id="c_team" required><option value="">팀을 선택하세요</option>${teams.map(t=>`<option>${esc(t)}</option>`).join('')}</select></label>
     <label class="f">이름<select class="in" id="c_name" required disabled><option value="">먼저 팀을 선택하세요</option></select></label>
