@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>교육 출석 인증</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+<div class="m-page"><div class="m-org"><img src="logo.png" alt="대륜E&S"><span id="org">교육 출석 인증</span></div><div class="m-card" id="mc"><div class="muted">확인 중…</div></div></div>
+<script>
+const CFG = window.APP_CONFIG || {};
+const ORG = CFG.ORG || '대륜E&S';
+document.querySelector('.m-org img').alt = ORG;
+const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+const mc = document.getElementById('mc');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pad = n => String(n).padStart(2,'0');
+const hms = t => { const d=new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const store = { get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} } };
+
+// 기기 식별값: 이 휴대폰에서 처음 열 때 만든 임의값 (같은 폰으로 여러 명 인증하면 '확인필요' 표시)
+let device = store.get('att_device');
+if(!device){ device = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)); store.set('att_device', device); }
+
+const hp = new URLSearchParams(location.hash.slice(1));
+const SID = hp.get('s'), TOKEN = hp.get('t');
+history.replaceState(null, '', location.pathname); // 주소창에서 토큰 지우기(캡처·공유 방지)
+
+const msg = (t, b) => { mc.innerHTML = `<h1>${t}</h1><p class="muted">${b}</p>`; };
+const STATUS = {
+  not_found: ['교육 회차를 찾을 수 없습니다', '담당자에게 문의해 주세요.'],
+  idle:      ['아직 인증 시간이 아닙니다', '담당자가 인증을 시작하면 화면의 QR을 다시 스캔해 주세요.'],
+  closed:    ['인증이 마감되었습니다', '인증을 놓쳤다면 인사팀 담당자에게 현장에서 확인받으세요.'],
+  expired:   ['QR이 만료되었습니다', '교육장 화면에 떠 있는 QR을 지금 다시 스캔해 주세요. QR은 30초마다 바뀝니다.'],
+  no_employee:['명단에서 찾을 수 없습니다', '인사팀 담당자에게 명단 등록을 요청해 주세요.']
+};
+
+async function start(){
+  if(!SID || !TOKEN) return msg('QR을 스캔해서 들어와 주세요', '교육장 화면에 띄운 QR로 들어와야 출석 인증을 할 수 있습니다.');
+  const { data, error } = await sb.rpc('checkin_context', { p_session: SID, p_token: TOKEN });
+  if(error) return msg('연결하지 못했습니다', '네트워크를 확인한 뒤 QR을 다시 스캔해 주세요.');
+  if(data.status !== 'ok') return msg(...(STATUS[data.status] || STATUS.not_found));
+  draw(data);
+}
+
+function draw(ctx){
+  const s = ctx.session, isIn = ctx.phase === 'in', roster = ctx.roster, deadline = Date.now() + ctx.expires_in * 1000;
+  const teams = [...new Set(roster.map(e => e.team))].sort((a,b) => a.localeCompare(b,'ko'));
+  mc.innerHTML = `<span class="m-badge" style="background:${isIn?'var(--blue)':'var(--orange)'}">${isIn?'입실 인증':'퇴실 인증'}</span>
+   <h1>${esc(s.course)} ${esc(s.round)}</h1><div class="muted tnum">${esc(s.edu_date)} · ${esc(s.start_time)}~${esc(s.end_time)} · ${esc(s.place)}</div>
+   <form id="mf" style="display:flex;flex-direction:column;gap:14px">
+    <label class="f">팀이름<select class="in" id="c_team" required><option value="">팀을 선택하세요</option>${teams.map(t=>`<option>${esc(t)}</option>`).join('')}</select></label>
+    <label class="f">이름<select class="in" id="c_name" required disabled><option value="">먼저 팀을 선택하세요</option></select></label>
+    <label class="f">사번 입력(숫자만)<input class="in" id="c_check" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="예) 20150000" required></label>
+    <label class="f">사내전화번호 입력<input class="in" id="c_ext" inputmode="numeric" autocomplete="off" placeholder="본인 사내전화번호를 입력하세요" required></label>
+    <div id="c_err"></div>
+    <button class="m-submit" id="c_go" disabled>${isIn?'입실':'퇴실'} 인증하기</button></form>
+   <div class="muted small" style="text-align:center" id="c_left"></div>
+   <div class="m-legal">· 수집 항목: 팀, 이름, 사번, 사내전화번호, 인증 시각, 기기 식별값(대리 인증 확인용)<br>· 수집 목적: 법정의무교육 이수 확인<br>· 보관 기간: 3년 후 파기 (남녀고용평등법 제33조, 개인정보 보호법 제15조제1항제2호)<br>· 본인 이외의 다른 사람을 대신 인증하면 안 됩니다.</div>`;
+  const team = document.getElementById('c_team'), name = document.getElementById('c_name'), go = document.getElementById('c_go');
+  const fillNames = () => {
+    name.innerHTML = `<option value="">${team.value?'이름을 선택하세요':'먼저 팀을 선택하세요'}</option>` +
+      roster.filter(e => e.team === team.value).map(e => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('');
+    name.disabled = !team.value; showInfo();
+  };
+  const showInfo = () => {
+    const e = roster.find(x => x.id === name.value);
+    go.disabled = !e;
+  };
+  document.getElementById('c_check').oninput = ev => { ev.target.value = ev.target.value.replace(/\D/g, ''); };
+  team.onchange = fillNames; name.onchange = () => { showInfo(); document.getElementById('c_ext').value = ''; document.getElementById('c_check').value = ''; };
+  const pre = roster.find(e => e.id === store.get('att_emp')); // 이 폰에서 지난번 고른 사람
+  if(pre){ team.value = pre.team; fillNames(); name.value = pre.id; showInfo(); }
+
+  const left = document.getElementById('c_left');
+  const tk = setInterval(() => {
+    const r = deadline - Date.now();
+    if(r <= 0){ clearInterval(tk); return msg('입력 시간이 지났습니다', '교육장 화면의 QR을 다시 스캔해 주세요.'); }
+    left.textContent = `남은 입력 시간 ${Math.floor(r/60000)}분 ${Math.floor(r%60000/1000)}초`;
+  }, 500);
+
+  document.getElementById('mf').onsubmit = async ev => {
+    ev.preventDefault();
+    const err = document.getElementById('c_err'); err.innerHTML = '';
+    const e = roster.find(x => x.id === name.value); if(!e) return;
+    const empNo = document.getElementById('c_check').value.trim(), ext = document.getElementById('c_ext').value.trim();
+    if(!empNo || !ext){ err.innerHTML = `<div class="m-err">사번과 사내전화번호를 모두 입력해 주세요.</div>`; return; }
+    go.disabled = true; go.textContent = '인증 중…';
+    const { data, error } = await sb.rpc('checkin_submit', {
+      p_session: SID, p_token: TOKEN, p_employee: e.id, p_device: device, p_ext: ext,
+      p_emp_no: empNo
+    });
+    const again = () => { go.disabled = false; go.textContent = `${isIn?'입실':'퇴실'} 인증하기`; };
+    if(error){ again(); err.innerHTML = `<div class="m-err">저장하지 못했습니다. 다시 눌러 주세요.</div>`; return; }
+    if(data.status === 'ext_mismatch'){ again(); err.innerHTML = `<div class="m-err">사내전화번호가 명단과 다릅니다. 본인 이름을 골랐는지, 사내전화번호를 맞게 입력했는지 확인해 주세요.</div>`; return; }
+    if(data.status === 'emp_mismatch'){ again(); err.innerHTML = `<div class="m-err">사번이 명단과 다릅니다. 본인 이름을 골랐는지, 사번을 맞게 입력했는지 확인해 주세요.</div>`; return; }
+    if(data.status !== 'ok' && data.status !== 'already'){ clearInterval(tk); return msg(...(STATUS[data.status] || STATUS.not_found)); }
+    clearInterval(tk); store.set('att_emp', e.id);
+    const already = data.status === 'already', ph = data.phase === 'in' ? '입실' : '퇴실';
+    mc.innerHTML = `<div class="m-done"><div class="big">${already?'ℹ️':'✅'}</div>
+      <h1 style="margin-top:12px">${already?'이미 인증되어 있습니다':ph+' 인증 완료'}</h1>
+      <p style="font-size:17px;margin:12px 0 4px"><b>${esc(data.name)}</b> · ${esc(data.team)}</p>
+      <p class="muted tnum" style="margin:0">${ph} 시각 ${hms(data.at)}</p>
+      ${data.phase==='in'?`<p class="muted small" style="margin-top:16px">교육이 끝나면 퇴실 QR을 한 번 더 스캔해야 이수로 인정됩니다.</p>`:''}</div>`;
+  };
+}
+start();
+</script>
+</body>
+</html>

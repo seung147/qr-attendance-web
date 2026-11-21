@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>교육 출석관리 · 대륜E&S</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<div id="app"><div class="empty">불러오는 중…</div></div>
+<script>
+const CFG = window.APP_CONFIG || {};
+const ORG = CFG.ORG || '대륜E&S';
+const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pad = n => String(n).padStart(2,'0');
+const hms = t => { if(!t) return ''; const d=new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const stamp = t => { const d=new Date(t); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const cleanId = s => String(s||'').trim().replace(/[^A-Za-z0-9_\-]/g,'');
+const ms = v => v ? Date.parse(v) : null;
+const PHASE = { idle:['대기','p-idle'], in:['입실 인증 중','p-in'], out:['퇴실 인증 중','p-out'], closed:['마감','p-idle'] };
+const RCLS = {'이수':'p-ok','확인필요':'p-warn','미이수':'p-bad'};
+
+const st = { roster:[], sessions:[], checkins:[], loaded:false, filter:'all', rq:'', rteam:'', update:null, poll:null, email:'' };
+
+function toast(msg){ const t=document.createElement('div'); t.className='toast'; t.textContent=msg; document.body.appendChild(t); setTimeout(()=>t.remove(),2800); }
+function ask(msg, okLabel='확인'){ return new Promise(res=>{
+  const bg=document.createElement('div'); bg.className='modal-bg';
+  bg.innerHTML=`<div class="modal" role="dialog"><div>${esc(msg)}</div><div class="row" style="justify-content:flex-end"><button class="btn" id="askNo">취소</button><button class="btn pri" id="askOk">${esc(okLabel)}</button></div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('#askNo').onclick=()=>{bg.remove();res(false)};
+  bg.querySelector('#askOk').onclick=()=>{bg.remove();res(true)};
+});}
+function fail(error){ if(error){ console.error(error); toast('처리하지 못했습니다: '+(error.message||error)); return true; } return false; }
+
+/* ---------- 데이터 ---------- */
+const mapEmp = r => ({id:r.id, team:r.team, name:r.name, empNo:r.emp_no, ext:r.ext||''});
+const mapSes = r => ({id:r.id, course:r.course, round:r.round, date:r.edu_date, start:r.start_time, end:r.end_time, place:r.place, lecturer:r.lecturer,
+  minMinutes:r.min_minutes, targetTeams:r.target_teams||[], targetEmpNos:r.target_emp_nos||[], requireEmpNo:r.require_emp_no, phase:r.phase});
+const mapChk = r => ({id:r.id, sid:r.session_id, empNo:r.emp_no, team:r.team, name:r.name, ext:r.ext||'', inAt:ms(r.in_at), outAt:ms(r.out_at),
+  inDev:r.in_device, outDev:r.out_device, inManual:r.in_manual, outManual:r.out_manual, override:r.override||''});
+
+async function fetchAll(table, build){ // Supabase는 한 번에 1000행까지라 나눠서 읽음
+  const out=[]; for(let from=0;;from+=1000){
+    const {data,error}=await build(sb.from(table).select('*')).range(from,from+999);
+    if(error) throw error; out.push(...data); if(data.length<1000) break; }
+  return out;
+}
+const sortRoster = l => l.sort((a,b)=>a.team.localeCompare(b.team,'ko')||a.name.localeCompare(b.name,'ko'));
+async function loadAll(){
+  try{
+    const [e,s,c]=await Promise.all([fetchAll('employees',q=>q.eq('active',true)), fetchAll('sessions',q=>q), fetchAll('checkins',q=>q)]);
+    st.roster=sortRoster(e.map(mapEmp)); st.sessions=s.map(mapSes); st.checkins=c.map(mapChk); st.loaded=true; render();
+  }catch(err){ fail(err); }
+}
+async function loadSession(sid){
+  const [{data:s,error:e1},{data:c,error:e2}]=await Promise.all([sb.from('sessions').select('*').eq('id',sid).maybeSingle(), sb.from('checkins').select('*').eq('session_id',sid)]);
+  if(e1||e2) return;
+  st.sessions=st.sessions.filter(x=>x.id!==sid); if(s) st.sessions.push(mapSes(s));
+  st.checkins=st.checkins.filter(x=>x.sid!==sid).concat((c||[]).map(mapChk)); render();
+}
+function render(){ if(st.update) st.update(); }
+
+/* ---------- 판정 ---------- */
+function dupIds(list){
+  const by={}; for(const c of list) for(const u of [c.inDev,c.outDev]){ if(!u) continue; (by[u]=by[u]||new Set()).add(c.empNo); }
+  const dup=new Set(); for(const c of list) for(const u of [c.inDev,c.outDev]) if(u&&by[u].size>1) dup.add(c.id);
+  return dup;
+}
+function judge(c,s,dup){
+  const mins = c.inAt&&c.outAt ? Math.floor((c.outAt-c.inAt)/60000) : null, notes=[];
+  if(dup.has(c.id)) notes.push('동일 기기 중복 인증');
+  if(!c.inAt) notes.push('입실 미확인');
+  if(!c.outAt) notes.push('퇴실 미확인');
+  if(c.inManual) notes.push('입실 수동등록('+c.inManual+')');
+  if(c.outManual) notes.push('퇴실 수동등록('+c.outManual+')');
+  let auto;
+  if(mins!==null && mins<(s.minMinutes||0)){ auto='미이수'; notes.unshift('체류 '+mins+'분'); }
+  else if(notes.some(n=>!n.includes('수동등록'))) auto='확인필요';
+  else auto='이수';
+  return {mins, auto, result:c.override||auto, notes:notes.join(', ')};
+}
+const teams = () => [...new Set(st.roster.map(e=>e.team))].sort((a,b)=>a.localeCompare(b,'ko'));
+const byTeamName = (a,b) => (a.team||'').localeCompare(b.team||'','ko') || (a.name||'').localeCompare(b.name||'','ko');
+// 대상자: 사번 지정 > 팀 지정 > 전체
+const restricted = s => s.targetEmpNos.length>0 || s.targetTeams.length>0;
+function isTarget(s, empNo, team){
+  if(s.targetEmpNos.length) return s.targetEmpNos.includes(empNo);
+  if(s.targetTeams.length) return s.targetTeams.includes(team);
+  return true;
+}
+function targets(s){ return st.roster.filter(e=>isTarget(s,e.empNo,e.team)); }
+function rows(s){
+  const list=st.checkins.filter(c=>c.sid===s.id), dup=dupIds(list);
+  return list.map(c=>({c, moved: restricted(s) && !isTarget(s,c.empNo,c.team), ...judge(c,s,dup)})).sort((a,b)=>byTeamName(a.c,b.c));
+}
+function summary(s){
+  const r=rows(s), tg=targets(s), done=new Set(r.map(x=>x.c.empNo)), sm=new Map(st.sessions.map(x=>[x.id,x]));
+  const missing=[], other=[]; // other: 이 회차 대상인데 같은 과정의 다른 회차를 들은 사람
+  tg.filter(e=>!done.has(e.empNo)).forEach(e=>{
+    const o=st.checkins.find(c=>c.empNo===e.empNo && c.sid!==s.id && (c.inAt||c.outAt) && sm.get(c.sid)?.course===s.course);
+    if(o) other.push({e, round:sm.get(o.sid).round}); else missing.push(e);
+  });
+  return { r, tg, missing, other, moved:r.filter(x=>x.moved).length, inN:r.filter(x=>x.c.inAt).length, outN:r.filter(x=>x.c.outAt).length,
+    ok:r.filter(x=>x.result==='이수').length, warn:r.filter(x=>x.result==='확인필요').length, bad:r.filter(x=>x.result==='미이수').length };
+}
+// 출석부·CSV용: 참석자 + 타회차 수강자 + 불참자를 팀 → 이름(가나다) 순으로
+function sheetRows(s){
+  const m=summary(s);
+  return [
+    ...m.r.map(x=>({team:x.c.team,empNo:x.c.empNo,name:x.c.name,ext:x.c.ext,inAt:x.c.inAt,outAt:x.c.outAt,mins:x.mins,result:x.result,notes:x.notes,blue:x.moved?'차수변경':''})),
+    ...m.other.map(o=>({team:o.e.team,empNo:o.e.empNo,name:o.e.name,ext:o.e.ext,inAt:null,outAt:null,mins:null,result:'타회차',notes:'',blue:`차수변경(${o.round} 수강)`})),
+    ...m.missing.map(e=>({team:e.team,empNo:e.empNo,name:e.name,ext:e.ext,inAt:null,outAt:null,mins:null,result:'불참',notes:'미인증',blue:''}))
+  ].sort(byTeamName);
+}
+const noteText = x => [x.blue, x.notes].filter(Boolean).join(', ');
+const noteHTML = x => [x.blue?`<span class="blue">${esc(x.blue)}</span>`:'', esc(x.notes)].filter(Boolean).join(', ');
+
+/* ---------- 내보내기 ---------- */
+function csv(lines){ return '﻿'+lines.map(l=>l.map(v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}).join(',')).join('\r\n'); }
+function download(name, text){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500); }
+function sessionLines(s){
+  const L=[['연번','팀','사번','이름','사내번호','입실','퇴실','체류(분)','결과','비고']];
+  sheetRows(s).forEach((x,i)=>L.push([i+1,x.team,x.empNo,x.name,x.ext,hms(x.inAt),hms(x.outAt),x.mins??'',x.result,noteText(x)]));
+  return L;
+}
+function allLines(){ // 전체 회차 취합
+  const L=[['교육일','교육과정','회차','팀','사번','이름','사내번호','입실','퇴실','체류(분)','결과','비고']];
+  st.sessions.slice().sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start)).forEach(s=>{
+    sheetRows(s).forEach(x=>L.push([s.date,s.course,s.round,x.team,x.empNo,x.name,x.ext,hms(x.inAt),hms(x.outAt),x.mins??'',x.result,noteText(x)]));
+  });
+  return L;
+}
+
+/* ---------- 로그인 ---------- */
+async function boot(){
+  if(!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('YOUR-PROJECT')){
+    app.innerHTML=`<div class="login card"><h1 style="font-size:18px">설정이 필요합니다</h1><p class="muted">config.js 에 Supabase 주소와 anon key를 넣어 주세요. (README 2단계)</p></div>`; return;
+  }
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session) return showLogin();
+  st.email=session.user.email;
+  const {data:isAdmin,error}=await sb.rpc('is_admin');
+  if(error||!isAdmin){
+    app.innerHTML=`<div class="login card"><h1 style="font-size:18px">관리자 등록이 필요합니다</h1><p class="muted">${esc(st.email)} 계정이 admins 목록에 없습니다. Supabase SQL Editor에서 등록해 주세요. (README 3단계)</p><button class="btn" id="lo">로그아웃</button></div>`;
+    document.getElementById('lo').onclick=async()=>{await sb.auth.signOut();location.reload()}; return;
+  }
+  window.addEventListener('hashchange', route);
+  await loadAll(); route();
+}
+function showLogin(){
+  app.innerHTML=`<div class="login"><div class="card" style="display:flex;flex-direction:column;gap:14px">
+   <div class="brand" style="color:var(--navy);flex-direction:column;align-items:flex-start;gap:8px"><img src="logo.png" alt="${esc(ORG)}" style="height:34px">교육 출석관리</div>
+   <form id="lf" style="display:flex;flex-direction:column;gap:12px">
+    <label class="f">이메일<input class="in" type="email" id="le" required autocomplete="username"></label>
+    <label class="f">비밀번호<input class="in" type="password" id="lp" required autocomplete="current-password"></label>
+    <div id="lerr" class="note"></div><button class="btn pri">로그인</button></form>
+   <p class="muted small" style="margin:0">인사팀 관리자 전용 화면입니다. 직원은 교육장 QR로 인증합니다.</p></div></div>`;
+  document.getElementById('lf').onsubmit=async ev=>{
+    ev.preventDefault();
+    const {error}=await sb.auth.signInWithPassword({email:document.getElementById('le').value.trim(),password:document.getElementById('lp').value});
+    if(error){ document.getElementById('lerr').textContent='이메일 또는 비밀번호가 맞지 않습니다.'; return; }
+    location.reload();
+  };
+}
+
+function route(){
+  clearInterval(st.poll); st.poll=null; st.update=null;
+  const h=location.hash.slice(1);
+  if(h.startsWith('qr-')) return mountQR(h.slice(3));
+  if(h.startsWith('sheet-')) return mountSheet(h.slice(6));
+  if(h.startsWith('s-')) return mountSession(h.slice(2));
+  if(h==='roster') return mountRoster();
+  return mountList();
+}
+function shell(active, inner){
+  setTimeout(()=>{ const b=document.getElementById('logout'); if(b) b.onclick=async()=>{await sb.auth.signOut();location.hash='';location.reload()}; });
+  return `<header class="topbar"><div class="brand"><span class="logo-chip"><img src="logo.png" alt="${esc(ORG)}"></span>교육 출석관리</div>
+  <nav class="nav"><a href="#sessions" class="${active==='sessions'?'on':''}">교육 회차</a><a href="#roster" class="${active==='roster'?'on':''}">직원 명단</a></nav>
+  <span class="small" style="opacity:.8">${esc(st.email)}</span><button class="btn sm" id="logout">로그아웃</button></header><main class="wrap">${inner}</main>`;
+}
+
+/* ---------- 회차 목록 ---------- */
+function mountList(){
+  app.innerHTML=shell('sessions',`
+  <div class="row between"><h1 style="font-size:20px">교육 회차</h1><div class="row"><button class="btn" id="allCsv">전체 출석 기록 CSV</button><button class="btn pri" id="newS">+ 새 회차 만들기</button></div></div>
+  <section class="card"><h2>회차 목록</h2><div id="slist"></div></section>`);
+  document.getElementById('newS').onclick=()=>sessionForm();
+  document.getElementById('allCsv').onclick=()=>download(`교육출석_전체_${stamp(Date.now()).slice(0,10)}.csv`, csv(allLines()));
+  st.update=()=>{
+    const el=document.getElementById('slist'); if(!el) return;
+    if(!st.loaded){ el.innerHTML=`<div class="empty">불러오는 중…</div>`; return; }
+    const list=st.sessions.slice().sort((a,b)=>(b.date+b.start).localeCompare(a.date+a.start));
+    if(!list.length){ el.innerHTML=`<div class="empty">아직 만든 회차가 없습니다. [+ 새 회차 만들기]로 첫 교육을 등록하세요.</div>`; return; }
+    el.innerHTML=list.map(s=>{const m=summary(s),ph=PHASE[s.phase]||PHASE.idle;return`
+      <div class="sess"><div><h3>${esc(s.course)} <span style="color:var(--blue)">${esc(s.round)}</span></h3>
+      <div class="muted small tnum">${esc(s.date)} ${esc(s.start)}~${esc(s.end)} · ${esc(s.place)} · 대상 ${m.tg.length}명 · 입실 ${m.inN} · 이수 ${m.ok} · 확인필요 ${m.warn} · 미인증 ${m.missing.length}</div></div>
+      <div class="row"><span class="pill ${ph[1]}">${ph[0]}</span><a class="btn sm" href="#s-${esc(s.id)}">열기</a></div></div>`}).join('');
+  };
+  render();
+}
+
+function sessionForm(s){
+  const e=s||{course:'2026년 법정의무교육(성희롱·괴롭힘 예방)',round:'1회차',date:'',start:'10:00',end:'11:00',place:'본사 대회의실',lecturer:'',minMinutes:55,targetTeams:[],requireEmpNo:false};
+  const bg=document.createElement('div'); bg.className='modal-bg';
+  bg.innerHTML=`<form class="modal" id="sf"><h2 style="font-size:17px">${s?'회차 수정':'새 회차 만들기'}</h2>
+  <label class="f">교육과정<input class="in" id="f_course" required value="${esc(e.course)}"></label>
+  <div class="grid">
+   <label class="f">회차<input class="in" id="f_round" required value="${esc(e.round)}" placeholder="예) 1회차(오전)"></label>
+   <label class="f">교육일<input class="in" type="date" id="f_date" required value="${esc(e.date)}"></label>
+   <label class="f">시작<input class="in" type="time" id="f_start" required value="${esc(e.start)}"></label>
+   <label class="f">종료<input class="in" type="time" id="f_end" required value="${esc(e.end)}"></label>
+   <label class="f">장소<input class="in" id="f_place" value="${esc(e.place)}"></label>
+   <label class="f">강사<input class="in" id="f_lect" value="${esc(e.lecturer)}"></label>
+   <label class="f">이수 기준(체류 분)<input class="in" type="number" min="0" id="f_min" value="${esc(e.minMinutes)}"></label>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)">대상 팀 (선택 안 하면 명단 전체)
+   <div class="teamcks">${teams().map(t=>`<label><input type="checkbox" value="${esc(t)}" ${e.targetTeams.includes(t)?'checked':''}>${esc(t)}</label>`).join('')||'<span>명단을 먼저 등록하세요</span>'}</div></div>
+  <label class="f">대상자 사번 지정 (선택) — 엑셀의 사번 열을 복사해 붙여넣으면 팀 선택보다 우선합니다. 대상이 아닌 사람이 인증하면 비고에 '차수변경'으로 표시됩니다.
+   <textarea class="in" id="f_emps" style="min-height:70px" placeholder="20150000&#10;20150185">${esc((e.targetEmpNos||[]).join('\n'))}</textarea><span id="f_empsn"></span></label>
+  <p class="muted small" style="margin:0">직원은 팀·이름을 고른 뒤 사번과 사내번호를 직접 입력해야 인증됩니다.</p>
+  <div class="row" style="justify-content:flex-end"><button type="button" class="btn" id="f_cancel">취소</button><button class="btn pri">${s?'저장':'만들기'}</button></div></form>`;
+  document.body.appendChild(bg);
+  bg.querySelector('#f_cancel').onclick=()=>bg.remove();
+  const parseEmps=()=>[...new Set(bg.querySelector('#f_emps').value.split(/[\s,;]+/).map(cleanId).filter(Boolean))];
+  const showN=()=>{ const l=parseEmps(), known=l.filter(n=>st.roster.some(r=>r.empNo===n)).length;
+    bg.querySelector('#f_empsn').textContent= l.length?`${l.length}명 입력 · 명단과 일치 ${known}명${known<l.length?` · 명단에 없는 사번 ${l.length-known}개`:''}`:''; };
+  bg.querySelector('#f_emps').oninput=showN; showN();
+  bg.querySelector('#sf').onsubmit=async ev=>{
+    ev.preventDefault(); const g=id=>bg.querySelector('#'+id).value.trim();
+    const row={course:g('f_course'),round:g('f_round'),edu_date:g('f_date'),start_time:g('f_start'),end_time:g('f_end'),place:g('f_place'),lecturer:g('f_lect'),
+      min_minutes:Number(g('f_min'))||0,target_teams:[...bg.querySelectorAll('.teamcks input:checked')].map(x=>x.value),target_emp_nos:parseEmps(),require_emp_no:true};
+    if(s){ const {error}=await sb.from('sessions').update(row).eq('id',s.id); if(fail(error)) return; bg.remove(); loadSession(s.id); }
+    else { const {data,error}=await sb.from('sessions').insert(row).select().single(); if(fail(error)) return; bg.remove(); st.sessions.push(mapSes(data)); location.hash='s-'+data.id; }
+  };
+}
+
+async function setPhase(sid,phase){ const {error}=await sb.from('sessions').update({phase}).eq('id',sid); if(!fail(error)) loadSession(sid); }
+
+/* ---------- 회차 상세 ---------- */
+function mountSession(sid){
+  app.innerHTML=shell('sessions',`<div id="shead"></div><section class="card" id="sctl"></section><div class="tiles" id="stiles"></div>
+  <section class="card"><div class="row between"><div class="row"><h2>출석 현황</h2>
+   <select class="in" id="flt"><option value="all">전체</option><option>이수</option><option>확인필요</option><option>미이수</option></select><span class="muted small">5초마다 자동 갱신</span></div>
+   <div class="row"><a class="btn" href="#sheet-${esc(sid)}">출석부 인쇄</a><button class="btn" id="csv">엑셀(CSV) 다운로드</button></div></div>
+   <div id="stbl" style="margin-top:12px"></div></section>
+  <section class="card"><h2>미인증 대상자 <span id="mcount" class="muted small"></span></h2><div id="miss" style="margin-top:10px"></div></section>
+  <section class="card"><h2>관리자 수동 등록</h2><p class="muted small" style="margin:6px 0 10px">휴대폰이 없거나 인증에 실패한 직원을 담당자가 직접 확인해 등록합니다. 비고에 "수동등록"으로 남습니다.</p>
+   <form class="row" id="mform"><select class="in" id="m_emp" style="min-width:220px"></select>
+   <select class="in" id="m_ph"><option value="in">입실</option><option value="out">퇴실</option></select>
+   <input class="in" type="time" step="1" id="m_time" title="비우면 지금 시각">
+   <input class="in" id="m_reason" placeholder="사유 예) 휴대폰 미지참, 현장 확인" style="flex:1;min-width:200px">
+   <button class="btn pri">등록</button></form></section>`);
+  const flt=document.getElementById('flt'); flt.value=st.filter; flt.onchange=()=>{st.filter=flt.value;render()};
+  const getS=()=>st.sessions.find(x=>x.id===sid);
+  document.getElementById('csv').onclick=()=>{const s=getS(); if(s) download(`출석부_${s.date}_${s.round}.csv`, csv(sessionLines(s)))};
+  document.getElementById('mform').onsubmit=async ev=>{
+    ev.preventDefault(); const s=getS(), emp=st.roster.find(e=>e.empNo===document.getElementById('m_emp').value);
+    if(!s||!emp){toast('직원을 선택하세요');return}
+    const ph=document.getElementById('m_ph').value, tv=document.getElementById('m_time').value, reason=document.getElementById('m_reason').value.trim()||'현장 확인';
+    let t=new Date(); if(tv){ const x=new Date(`${s.date}T${tv.length===5?tv+':00':tv}`); if(!isNaN(x)) t=x; }
+    const ex=st.checkins.find(c=>c.sid===sid&&c.empNo===emp.empNo);
+    const patch= ph==='in'?{in_at:t.toISOString(),in_device:null,in_manual:reason}:{out_at:t.toISOString(),out_device:null,out_manual:reason};
+    const {error}= ex ? await sb.from('checkins').update(patch).eq('id',ex.id)
+                      : await sb.from('checkins').insert({session_id:sid,emp_no:emp.empNo,team:emp.team,name:emp.name,ext:emp.ext,...patch});
+    if(fail(error)) return; toast(`${emp.name} ${ph==='in'?'입실':'퇴실'} 수동 등록했습니다.`); document.getElementById('m_reason').value=''; loadSession(sid);
+  };
+  let lastKey='';
+  st.update=()=>{
+    const s=getS(), head=document.getElementById('shead'); if(!head) return;
+    if(!s){ head.innerHTML=`<div class="card empty">회차를 찾을 수 없습니다. <a href="#sessions">목록으로</a></div>`; return; }
+    const m=summary(s), ph=PHASE[s.phase]||PHASE.idle;
+    head.innerHTML=`<a class="back" href="#sessions">← 교육 회차 목록</a>
+     <div class="row between" style="margin-top:6px"><h1 style="font-size:20px">${esc(s.course)} <span style="color:var(--blue)">${esc(s.round)}</span></h1>
+     <div class="row"><button class="btn" id="editS">수정</button><button class="btn danger" id="delS">삭제</button></div></div>
+     <div class="muted small tnum">${esc(s.date)} ${esc(s.start)}~${esc(s.end)} · ${esc(s.place)}${s.lecturer?' · 강사 '+esc(s.lecturer):''} · 이수 기준 ${s.minMinutes}분 · 대상 ${s.targetEmpNos.length?`사번 지정 ${s.targetEmpNos.length}명`:s.targetTeams.length?esc(s.targetTeams.join(', ')):'전체'}</div>`;
+    head.querySelector('#editS').onclick=()=>sessionForm(s);
+    head.querySelector('#delS').onclick=async()=>{ if(!await ask(`이 회차와 출석 기록 ${m.r.length}건을 모두 삭제합니다. 되돌릴 수 없습니다.`,'삭제')) return;
+      const {error}=await sb.from('sessions').delete().eq('id',sid); if(fail(error)) return;
+      st.sessions=st.sessions.filter(x=>x.id!==sid); st.checkins=st.checkins.filter(x=>x.sid!==sid); location.hash='sessions'; };
+    const ctl=document.getElementById('sctl');
+    ctl.innerHTML=`<div class="row between"><div class="row"><b>인증 상태</b><span class="pill ${ph[1]}">${ph[0]}</span>
+      <button class="btn blue" id="pIn" ${s.phase==='in'?'disabled':''}>▶ 입실 인증 시작</button>
+      <button class="btn orange" id="pOut" ${s.phase==='out'?'disabled':''}>▶ 퇴실 인증 시작</button>
+      <button class="btn" id="pClose" ${s.phase==='closed'||s.phase==='idle'?'disabled':''}>■ 인증 마감</button></div>
+      <a class="btn pri" href="#qr-${esc(sid)}" target="_blank" rel="noopener">QR 화면 열기 (새 창)</a></div>
+      <p class="muted small" style="margin:10px 0 0">교육 시작 전 [입실 인증 시작] → QR 화면을 빔프로젝터로 띄움 → 교육 종료 시 [퇴실 인증 시작] → 끝나면 [인증 마감]. QR은 30초마다 바뀌고 5분이 지난 QR 사진으로는 인증되지 않습니다.</p>`;
+    ctl.querySelector('#pIn').onclick=()=>setPhase(sid,'in');
+    ctl.querySelector('#pOut').onclick=()=>setPhase(sid,'out');
+    ctl.querySelector('#pClose').onclick=()=>setPhase(sid,'closed');
+    document.getElementById('stiles').innerHTML=[['대상',m.tg.length,''],['입실 인증',m.inN,''],['퇴실 인증',m.outN,''],['이수',m.ok,'ok'],['확인필요',m.warn,'warn'],['미이수',m.bad,'bad'],['차수변경',m.moved,''],['미인증',m.missing.length,m.missing.length?'bad':'']]
+      .map(([k,v,c])=>`<div class="tile ${c}"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+    const list=m.r.filter(x=>st.filter==='all'||x.result===st.filter);
+    const tbl=document.getElementById('stbl');
+    if(tbl.contains(document.activeElement) && document.activeElement.tagName==='SELECT') return; // 판정 고르는 중엔 다시 그리지 않음
+    tbl.innerHTML= !m.r.length?`<div class="empty">아직 인증한 사람이 없습니다.</div>`:`<div class="tbl-wrap"><table class="t"><thead><tr><th>연번</th><th>팀</th><th>사번</th><th>이름</th><th>사내번호</th><th>입실</th><th>퇴실</th><th>체류(분)</th><th>결과</th><th>비고</th><th>판정</th><th></th></tr></thead><tbody>
+     ${list.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.c.team)}</td><td>${esc(x.c.empNo)}</td><td><b>${esc(x.c.name)}</b></td><td>${esc(x.c.ext)}</td><td>${hms(x.c.inAt)}</td><td>${hms(x.c.outAt)}</td><td>${x.mins??''}</td>
+      <td><span class="pill ${RCLS[x.result]}">${x.result}</span></td><td class="l note">${noteHTML({blue:x.moved?'차수변경':'',notes:x.notes})}</td>
+      <td><select class="in ov" data-id="${esc(x.c.id)}" aria-label="판정"><option value="">자동(${x.auto})</option>${['이수','미이수','확인필요'].map(o=>`<option ${x.c.override===o?'selected':''}>${o}</option>`).join('')}</select></td>
+      <td><button class="btn sm danger del" data-id="${esc(x.c.id)}" data-n="${esc(x.c.name)}">기록삭제</button></td></tr>`).join('')}</tbody></table></div>`;
+    tbl.querySelectorAll('.ov').forEach(el=>el.onchange=async()=>{ const {error}=await sb.from('checkins').update({override:el.value}).eq('id',el.dataset.id); el.blur(); if(!fail(error)) loadSession(sid); });
+    tbl.querySelectorAll('.del').forEach(el=>el.onclick=async()=>{ if(!await ask(el.dataset.n+'님의 출석 기록을 삭제할까요?','삭제')) return;
+      const {error}=await sb.from('checkins').delete().eq('id',el.dataset.id); if(!fail(error)) loadSession(sid); });
+    document.getElementById('mcount').textContent=`(${m.missing.length}명)`;
+    document.getElementById('miss').innerHTML=(m.missing.length?`<div class="chips">${m.missing.map(e=>`<span class="chip">${esc(e.team)} · ${esc(e.name)} <span class="muted tnum">${esc(e.empNo)}</span></span>`).join('')}</div>`:`<div class="muted">대상자 전원이 인증했습니다.</div>`)
+      +(m.other.length?`<div class="small" style="margin-top:12px">다른 회차에서 수강 ${m.other.length}명: <span class="blue">${m.other.map(o=>esc(o.e.name)+'('+esc(o.round)+')').join(', ')}</span></div>`:'');
+    const key=st.roster.map(e=>e.empNo).join();
+    if(key!==lastKey){ lastKey=key; document.getElementById('m_emp').innerHTML=`<option value="">직원 선택</option>`+teams().map(t=>`<optgroup label="${esc(t)}">${st.roster.filter(e=>e.team===t).map(e=>`<option value="${esc(e.empNo)}">${esc(e.name)} (${esc(e.empNo)})</option>`).join('')}</optgroup>`).join(''); }
+  };
+  render(); loadSession(sid);
+  st.poll=setInterval(()=>{ if(!document.hidden) loadSession(sid); },5000);
+}
+
+/* ---------- QR 화면 (빔프로젝터) ---------- */
+function mountQR(sid){
+  app.innerHTML=`<div class="qr-page"><img class="qr-logo" src="logo.png" alt="${esc(ORG)}"><div class="meta" id="qmeta"></div><h1 id="qtitle">불러오는 중…</h1><div class="phase ph-idle" id="qphase"></div>
+   <div class="qrbox" id="qrbox"></div><div class="bar"><i id="qbar" style="width:0"></i></div>
+   <div class="muted">휴대폰 카메라로 QR을 스캔한 뒤 <b>팀·이름</b>을 선택하세요 · QR은 30초마다 바뀝니다</div>
+   <div class="count" id="qcount"></div>
+   <div class="row" style="margin-top:20px;justify-content:center"><button class="btn blue sm" id="qIn">입실 시작</button><button class="btn orange sm" id="qOut">퇴실 시작</button><button class="btn sm" id="qClose">마감</button><button class="btn sm" id="qFull">전체화면</button><a class="btn sm" href="#s-${esc(sid)}">관리 화면</a></div></div>`;
+  const getS=()=>st.sessions.find(x=>x.id===sid);
+  document.getElementById('qIn').onclick=()=>setPhase(sid,'in');
+  document.getElementById('qOut').onclick=()=>setPhase(sid,'out');
+  document.getElementById('qClose').onclick=()=>setPhase(sid,'closed');
+  document.getElementById('qFull').onclick=()=>document.documentElement.requestFullscreen?.().catch(()=>{});
+  const base=location.href.split('#')[0].replace(/[^/]*$/,'');
+  let token='', nextAt=0, drawn='', fetching=false;
+  async function refreshToken(){
+    if(fetching) return; fetching=true;
+    const {data,error}=await sb.rpc('qr_token',{p_session:sid}); fetching=false;
+    if(error){ console.error(error); nextAt=Date.now()+3000; return; }
+    token=data.token; nextAt=Date.now()+data.next_in*1000+300; render();
+  }
+  st.update=()=>{
+    const s=getS(); if(!s) return;
+    const m=summary(s), live=s.phase==='in'||s.phase==='out';
+    document.getElementById('qmeta').textContent=`${s.date} ${s.start}~${s.end} · ${s.place}`;
+    document.getElementById('qtitle').textContent=`${s.course} ${s.round}`;
+    const pe=document.getElementById('qphase');
+    pe.className='phase '+(s.phase==='in'?'ph-in':s.phase==='out'?'ph-out':'ph-idle');
+    pe.textContent= s.phase==='in'?'입실 인증':s.phase==='out'?'퇴실 인증':s.phase==='closed'?'인증 마감':'인증 대기';
+    document.getElementById('qcount').innerHTML= s.phase==='out'?`퇴실 인증 <b>${m.outN}</b>명 / 입실 ${m.inN}명`:`입실 인증 <b>${m.inN}</b>명 / 대상 ${m.tg.length}명`;
+    const box=document.getElementById('qrbox');
+    if(!live||!token){ drawn=''; box.innerHTML=`<div>${s.phase==='closed'?'인증이 마감되었습니다':live?'QR 준비 중…':'[입실 시작]을 누르면 QR이 나타납니다'}</div>`; return; }
+    const url=`${base}c.html#s=${sid}&t=${token}`;
+    if(drawn!==url){ drawn=url; box.innerHTML=''; new QRCode(box,{text:url,width:512,height:512,correctLevel:QRCode.CorrectLevel.M}); }
+  };
+  render(); loadSession(sid); refreshToken();
+  let tick=0;
+  st.poll=setInterval(()=>{
+    const s=getS(), live=s&&(s.phase==='in'||s.phase==='out'), left=nextAt-Date.now();
+    document.getElementById('qbar').style.width= live&&token ? Math.max(0,Math.min(100,left/300))+'%' : '0';
+    if(live && left<=0) refreshToken();
+    if(++tick%5===0) loadSession(sid);
+  },1000);
+}
+
+/* ---------- 출석부 인쇄 ---------- */
+function mountSheet(sid){
+  app.innerHTML=`<div class="sheet-tools"><a class="btn" href="#s-${esc(sid)}">← 돌아가기</a><button class="btn pri" onclick="print()">인쇄 / PDF 저장</button><button class="btn" id="shCsv">엑셀(CSV)</button>
+   <span class="muted small">인쇄 설정: A4 세로, "머리글/바닥글" 해제 권장</span></div><div class="paper" id="paper"></div>`;
+  const getS=()=>st.sessions.find(x=>x.id===sid);
+  document.getElementById('shCsv').onclick=()=>{const s=getS(); s&&download(`출석부_${s.date}_${s.round}.csv`, csv(sessionLines(s)))};
+  st.update=()=>{
+    const s=getS(), p=document.getElementById('paper'); if(!s){ p.textContent='불러오는 중…'; return; }
+    const m=summary(s);
+    p.innerHTML=`<img src="logo.png" alt="${esc(ORG)}" style="height:24px"><h1>법정의무교육 출석부</h1>
+    <table style="margin-bottom:14px"><tr><th style="width:15%">교육과정</th><td class="l" colspan="3">${esc(s.course)}</td></tr>
+    <tr><th>회차</th><td class="l">${esc(s.round)}</td><th style="width:15%">교육일시</th><td class="l">${esc(s.date)} ${esc(s.start)}~${esc(s.end)}</td></tr>
+    <tr><th>장소</th><td class="l">${esc(s.place)}</td><th>강사</th><td class="l">${esc(s.lecturer)}</td></tr>
+    <tr><th>확인방식</th><td class="l" colspan="3">QR 전자인증(입실·퇴실 시각 자동기록, 등재 명단에서 팀·이름 선택 후 사번·사내번호 대조) · 이수기준: 입·퇴실 인증 및 체류 ${s.minMinutes}분 이상</td></tr></table>
+    <table><tr><th>연번</th><th>팀</th><th>사번</th><th>성명</th><th>사내번호</th><th>입실</th><th>퇴실</th><th>체류<br>(분)</th><th>결과</th><th>비고</th></tr>
+    ${sheetRows(s).map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.team)}</td><td>${esc(x.empNo)}</td><td>${esc(x.name)}</td><td>${esc(x.ext)}</td><td>${hms(x.inAt)}</td><td>${hms(x.outAt)}</td><td>${x.mins??''}</td><td>${esc(x.result)}</td><td class="l" style="font-size:11px">${noteHTML(x)}</td></tr>`).join('')}</table>
+    <p style="font-weight:700;margin:12px 0">대상 ${m.tg.length}명 · 참석 ${m.r.length}명 (이수 ${m.ok}명 · 확인필요 ${m.warn}명 · 미이수 ${m.bad}명${m.moved?` · 차수변경 ${m.moved}명`:''}) · 타회차 수강 ${m.other.length}명 · 불참 ${m.missing.length}명</p>
+    <div style="display:flex;justify-content:space-between;margin-top:18px"><span>출력일시: ${stamp(Date.now())}</span><span>확인자: 인사팀 ______________ (서명)</span></div>`;
+  };
+  render(); loadSession(sid);
+}
+
+/* ---------- 직원 명단 ---------- */
+function parsePaste(text){
+  const out=[], bad=[];
+  text.split(/\r?\n/).forEach((line,i)=>{ if(!line.trim()) return;
+    if(i===0 && /사번|이름|성명/.test(line)) return;
+    const [team,name,empRaw,ext]=line.split(line.includes('\t')?'\t':',').map(x=>x.trim()); const empNo=cleanId(empRaw);
+    if(!team||!name||!empNo) bad.push(i+1); else out.push({team,name,emp_no:empNo,ext:ext||'',active:true});
+  });
+  const map=new Map(out.map(e=>[e.emp_no,e])); return {out:[...map.values()],bad};
+}
+async function upsertEmployees(list){
+  for(let i=0;i<list.length;i+=500){ const {error}=await sb.from('employees').upsert(list.slice(i,i+500),{onConflict:'emp_no'}); if(fail(error)) return false; }
+  return true;
+}
+function mountRoster(){
+  app.innerHTML=shell('roster',`<div class="row between"><h1 style="font-size:20px">직원 명단</h1><div class="row"><span class="muted" id="rsum"></span><button class="btn sm" id="rcsv">명단 CSV</button></div></div>
+  <section class="card"><h2>엑셀에서 한 번에 등록</h2><p class="muted small" style="margin:6px 0 10px">엑셀에서 <b>팀이름 · 이름 · 사번 · 사내번호</b> 순서의 4개 열을 선택해 복사한 뒤 붙여넣으세요. 첫 줄이 제목행이면 건너뜁니다. 사번이 같으면 정보를 고칩니다.</p>
+   <textarea class="in" id="paste" placeholder="인사팀	홍길동	20150000	2201&#10;재무팀	정우성	20150185	2301"></textarea>
+   <div class="row between" style="margin-top:10px"><div class="row small"><label class="row"><input type="radio" name="pm" value="merge" checked> 기존 명단에 추가·갱신</label><label class="row"><input type="radio" name="pm" value="replace"> 전체 교체 (목록에 없는 직원은 비활성)</label></div>
+   <div class="row"><span class="muted small" id="pprev"></span><button class="btn pri" id="pgo">명단 불러오기</button></div></div></section>
+  <section class="card"><h2>한 명씩 추가</h2>
+   <form class="row" id="radd" style="margin-top:10px"><input class="in" id="a_team" placeholder="팀이름" list="teamlist" required><datalist id="teamlist"></datalist>
+   <input class="in" id="a_name" placeholder="이름" required><input class="in" id="a_emp" placeholder="사번" required inputmode="numeric"><input class="in" id="a_ext" placeholder="사내번호" inputmode="numeric"><button class="btn pri">추가</button></form></section>
+  <section class="card"><div class="row between"><h2>등재 명단</h2><div class="row"><input class="in" id="rq" placeholder="이름·사번 검색" value="${esc(st.rq)}"><select class="in" id="rteam"></select></div></div>
+   <div id="rtbl" style="margin-top:12px"></div></section>`);
+  const paste=document.getElementById('paste'), prev=document.getElementById('pprev');
+  paste.oninput=()=>{ const {out,bad}=parsePaste(paste.value); prev.textContent= paste.value.trim()?`${out.length}명 인식${bad.length?` · 확인 필요 줄: ${bad.slice(0,5).join(', ')}${bad.length>5?'…':''}`:''}`:''; };
+  document.getElementById('pgo').onclick=async()=>{
+    const {out}=parsePaste(paste.value); if(!out.length){toast('인식된 행이 없습니다. 4개 열(팀이름·이름·사번·사내번호)인지 확인하세요.');return}
+    const replace=document.querySelector('input[name=pm]:checked').value==='replace';
+    if(replace && !await ask(`목록에 없는 기존 직원 ${st.roster.filter(e=>!out.some(o=>o.emp_no===e.empNo)).length}명을 비활성 처리하고 ${out.length}명으로 바꿉니다. 지난 출석 기록은 그대로 남습니다.`,'교체')) return;
+    if(!await upsertEmployees(out)) return;
+    if(replace){ const keep=new Set(out.map(o=>o.emp_no)); const off=st.roster.filter(e=>!keep.has(e.empNo)).map(e=>e.id);
+      for(let i=0;i<off.length;i+=200){ const {error}=await sb.from('employees').update({active:false}).in('id',off.slice(i,i+200)); if(fail(error)) break; } }
+    paste.value=''; prev.textContent=''; toast(`${out.length}명을 불러왔습니다.`); loadAll();
+  };
+  document.getElementById('radd').onsubmit=async ev=>{
+    ev.preventDefault(); const g=id=>document.getElementById(id).value.trim();
+    const e={team:g('a_team'),name:g('a_name'),emp_no:cleanId(g('a_emp')),ext:g('a_ext'),active:true}; if(!e.emp_no){toast('사번은 숫자·영문만 쓸 수 있습니다');return}
+    if(!await upsertEmployees([e])) return;
+    ['a_name','a_emp','a_ext'].forEach(id=>document.getElementById(id).value=''); document.getElementById('a_name').focus(); loadAll();
+  };
+  document.getElementById('rcsv').onclick=()=>download('직원명단.csv', csv([['팀이름','이름','사번','사내번호'],...st.roster.map(e=>[e.team,e.name,e.empNo,e.ext])]));
+  document.getElementById('rq').oninput=ev=>{st.rq=ev.target.value;render()};
+  const rteam=document.getElementById('rteam'); rteam.onchange=()=>{st.rteam=rteam.value;render()};
+  st.update=()=>{
+    const tl=teams();
+    document.getElementById('rsum').textContent=`총 ${st.roster.length}명 · ${tl.length}개 팀`;
+    document.getElementById('teamlist').innerHTML=tl.map(t=>`<option value="${esc(t)}">`).join('');
+    rteam.innerHTML=`<option value="">전체 팀</option>`+tl.map(t=>`<option ${st.rteam===t?'selected':''}>${esc(t)}</option>`).join('');
+    const q=st.rq.trim(), list=st.roster.filter(e=>(!st.rteam||e.team===st.rteam)&&(!q||e.name.includes(q)||e.empNo.includes(q)));
+    document.getElementById('rtbl').innerHTML= !list.length?`<div class="empty">${st.roster.length?'검색 결과가 없습니다.':'등재된 직원이 없습니다. 엑셀에서 붙여넣거나 한 명씩 추가하세요.'}</div>`:
+     `<div class="tbl-wrap"><table class="t"><thead><tr><th>연번</th><th>팀이름</th><th>이름</th><th>사번</th><th>사내번호</th><th></th></tr></thead><tbody>${list.map((e,i)=>`<tr><td>${i+1}</td><td>${esc(e.team)}</td><td><b>${esc(e.name)}</b></td><td>${esc(e.empNo)}</td><td>${esc(e.ext)}</td><td><button class="btn sm danger rdel" data-id="${esc(e.id)}" data-n="${esc(e.name)}">삭제</button></td></tr>`).join('')}</tbody></table></div>`;
+    document.querySelectorAll('.rdel').forEach(b=>b.onclick=async()=>{ if(!await ask(b.dataset.n+'님을 명단에서 뺍니다. 지난 출석 기록은 남습니다.','빼기')) return;
+      const {error}=await sb.from('employees').update({active:false}).eq('id',b.dataset.id); if(!fail(error)) loadAll(); });
+  };
+  render();
+}
+
+boot();
+</script>
+</body>
+</html>
