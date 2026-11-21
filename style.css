@@ -130,3 +130,7 @@ table.t tr:hover td{background:var(--soft)}
 .paper img,.qr-logo,.m-org img,.logo-chip img{max-width:100%}
 /* 한국어 줄바꿈: 단어(어절) 중간에서 끊지 않기 */
 body{word-break:keep-all;overflow-wrap:anywhere}
+/* 출석부: 비고만 줄바꿈, 나머지 칸은 한 줄 */
+.paper table.sheet{font-size:11.5px}
+.paper table.sheet th,.paper table.sheet td{white-space:nowrap;padding:5px 4px}
+.paper table.sheet .memo{white-space:normal;word-break:keep-all;font-size:10.5px;width:100%;min-width:90px}

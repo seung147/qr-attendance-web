@@ -29,7 +29,7 @@ const stamp = t => { const d=new Date(t); return `${d.getFullYear()}-${pad(d.get
 const cleanId = s => String(s||'').trim().replace(/[^A-Za-z0-9_\-]/g,'');
 const ms = v => v ? Date.parse(v) : null;
 const PHASE = { idle:['대기','p-idle'], in:['입실 인증 중','p-in'], out:['퇴실 인증 중','p-out'], closed:['마감','p-idle'] };
-const RCLS = {'이수':'p-ok','확인필요':'p-warn','미이수':'p-bad'};
+const RCLS = {'이수':'p-ok','확인필요':'p-warn','동일기기 중복인증':'p-warn','미이수':'p-bad','불참':'p-bad'};
 
 const st = { roster:[], sessions:[], checkins:[], loaded:false, filter:'all', rq:'', rteam:'', update:null, poll:null, email:'' };
 
@@ -79,13 +79,14 @@ function dupIds(list){
 }
 function judge(c,s,dup){
   const mins = c.inAt&&c.outAt ? Math.floor((c.outAt-c.inAt)/60000) : null, notes=[];
-  if(dup.has(c.id)) notes.push('동일 기기 중복 인증');
   if(!c.inAt) notes.push('입실 미확인');
   if(!c.outAt) notes.push('퇴실 미확인');
   if(c.inManual) notes.push('입실 수동등록('+c.inManual+')');
   if(c.outManual) notes.push('퇴실 수동등록('+c.outManual+')');
   let auto;
-  if(mins!==null && mins<(s.minMinutes||0)){ auto='미이수'; notes.unshift('체류 '+mins+'분'); }
+  if(mins!==null && mins<(s.minMinutes||0)) notes.unshift('체류 '+mins+'분');
+  if(dup.has(c.id)) auto='동일기기 중복인증';   // 담당자가 확인 후 판정을 이수/불참 등으로 변경
+  else if(mins!==null && mins<(s.minMinutes||0)) auto='미이수';
   else if(notes.some(n=>!n.includes('수동등록'))) auto='확인필요';
   else auto='이수';
   return {mins, auto, result:c.override||auto, notes:notes.join(', ')};
@@ -105,20 +106,22 @@ function rows(s){
   return list.map(c=>({c, moved: restricted(s) && !isTarget(s,c.empNo,c.team), ...judge(c,s,dup)})).sort((a,b)=>byTeamName(a.c,b.c));
 }
 function summary(s){
-  const r=rows(s), tg=targets(s), done=new Set(r.map(x=>x.c.empNo)), sm=new Map(st.sessions.map(x=>[x.id,x]));
+  const r=rows(s), tg=targets(s), sm=new Map(st.sessions.map(x=>[x.id,x]));
+  const att=r.filter(x=>x.c.inAt);            // 입실 기록이 있어야 참석 (퇴실만 있는 기록은 출석부에서 제외)
+  const done=new Set(att.map(x=>x.c.empNo));
   const missing=[], other=[]; // other: 이 회차 대상인데 같은 과정의 다른 회차를 들은 사람
   tg.filter(e=>!done.has(e.empNo)).forEach(e=>{
-    const o=st.checkins.find(c=>c.empNo===e.empNo && c.sid!==s.id && (c.inAt||c.outAt) && sm.get(c.sid)?.course===s.course);
+    const o=st.checkins.find(c=>c.empNo===e.empNo && c.sid!==s.id && c.inAt && sm.get(c.sid)?.course===s.course);
     if(o) other.push({e, round:sm.get(o.sid).round}); else missing.push(e);
   });
-  return { r, tg, missing, other, moved:r.filter(x=>x.moved).length, inN:r.filter(x=>x.c.inAt).length, outN:r.filter(x=>x.c.outAt).length,
+  return { r, att, tg, missing, other, moved:att.filter(x=>x.moved).length, dupN:r.filter(x=>x.result==='동일기기 중복인증').length, inN:r.filter(x=>x.c.inAt).length, outN:r.filter(x=>x.c.outAt).length,
     ok:r.filter(x=>x.result==='이수').length, warn:r.filter(x=>x.result==='확인필요').length, bad:r.filter(x=>x.result==='미이수').length };
 }
 // 출석부·CSV용: 참석자 + 타회차 수강자 + 불참자를 팀 → 이름(가나다) 순으로
 function sheetRows(s){
   const m=summary(s);
   return [
-    ...m.r.map(x=>({team:x.c.team,empNo:x.c.empNo,name:x.c.name,ext:x.c.ext,inAt:x.c.inAt,outAt:x.c.outAt,mins:x.mins,result:x.result,notes:x.notes,blue:x.moved?'차수변경':''})),
+    ...m.att.map(x=>({team:x.c.team,empNo:x.c.empNo,name:x.c.name,ext:x.c.ext,inAt:x.c.inAt,outAt:x.c.outAt,mins:x.mins,result:x.result,notes:x.notes,blue:x.moved?'차수변경':''})),
     ...m.other.map(o=>({team:o.e.team,empNo:o.e.empNo,name:o.e.name,ext:o.e.ext,inAt:null,outAt:null,mins:null,result:'타회차',notes:'',blue:`차수변경(${o.round} 수강)`})),
     ...m.missing.map(e=>({team:e.team,empNo:e.empNo,name:e.name,ext:e.ext,inAt:null,outAt:null,mins:null,result:'불참',notes:'미인증',blue:''}))
   ].sort(byTeamName);
@@ -130,12 +133,12 @@ const noteHTML = x => [x.blue?`<span class="blue">${esc(x.blue)}</span>`:'', esc
 function csv(lines){ return '﻿'+lines.map(l=>l.map(v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}).join(',')).join('\r\n'); }
 function download(name, text){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'})); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500); }
 function sessionLines(s){
-  const L=[['연번','팀','사번','이름','사내번호','입실','퇴실','체류(분)','결과','비고']];
+  const L=[['연번','부서명','사번','이름','사내번호','입실','퇴실','체류(분)','결과','비고']];
   sheetRows(s).forEach((x,i)=>L.push([i+1,x.team,x.empNo,x.name,x.ext,hms(x.inAt),hms(x.outAt),x.mins??'',x.result,noteText(x)]));
   return L;
 }
 function allLines(){ // 전체 회차 취합
-  const L=[['교육일','교육과정','회차','팀','사번','이름','사내번호','입실','퇴실','체류(분)','결과','비고']];
+  const L=[['교육일','교육과정','회차','부서명','사번','이름','사내번호','입실','퇴실','체류(분)','결과','비고']];
   st.sessions.slice().sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start)).forEach(s=>{
     sheetRows(s).forEach(x=>L.push([s.date,s.course,s.round,x.team,x.empNo,x.name,x.ext,hms(x.inAt),hms(x.outAt),x.mins??'',x.result,noteText(x)]));
   });
@@ -224,11 +227,11 @@ function sessionForm(s){
    <label class="f">강사<input class="in" id="f_lect" value="${esc(e.lecturer)}"></label>
    <label class="f">이수 기준(체류 분)<input class="in" type="number" min="0" id="f_min" value="${esc(e.minMinutes)}"></label>
   </div>
-  <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)">대상 팀 (선택 안 하면 명단 전체)
+  <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)">대상 부서 (선택 안 하면 명단 전체)
    <div class="teamcks">${teams().map(t=>`<label><input type="checkbox" value="${esc(t)}" ${e.targetTeams.includes(t)?'checked':''}>${esc(t)}</label>`).join('')||'<span>명단을 먼저 등록하세요</span>'}</div></div>
-  <label class="f">대상자 사번 지정 (선택) — 엑셀의 사번 열을 복사해 붙여넣으면 팀 선택보다 우선합니다. 대상이 아닌 사람이 인증하면 비고에 '차수변경'으로 표시됩니다.
+  <label class="f">대상자 사번 지정 (선택) — 엑셀의 사번 열을 복사해 붙여넣으면 부서 선택보다 우선합니다. 대상이 아닌 사람이 인증하면 비고에 '차수변경'으로 표시됩니다.
    <textarea class="in" id="f_emps" style="min-height:70px" placeholder="20150000&#10;20150185">${esc((e.targetEmpNos||[]).join('\n'))}</textarea><span id="f_empsn"></span></label>
-  <p class="muted small" style="margin:0">직원은 팀·이름을 고른 뒤 사번과 사내번호를 직접 입력해야 인증됩니다.</p>
+  <p class="muted small" style="margin:0">직원은 부서·이름을 고른 뒤 사번과 사내번호를 직접 입력해야 인증됩니다.</p>
   <div class="row" style="justify-content:flex-end"><button type="button" class="btn" id="f_cancel">취소</button><button class="btn pri">${s?'저장':'만들기'}</button></div></form>`;
   document.body.appendChild(bg);
   bg.querySelector('#f_cancel').onclick=()=>bg.remove();
@@ -298,15 +301,15 @@ function mountSession(sid){
     ctl.querySelector('#pIn').onclick=()=>setPhase(sid,'in');
     ctl.querySelector('#pOut').onclick=()=>setPhase(sid,'out');
     ctl.querySelector('#pClose').onclick=()=>setPhase(sid,'closed');
-    document.getElementById('stiles').innerHTML=[['대상',m.tg.length,''],['입실 인증',m.inN,''],['퇴실 인증',m.outN,''],['이수',m.ok,'ok'],['확인필요',m.warn,'warn'],['미이수',m.bad,'bad'],['차수변경',m.moved,''],['미인증',m.missing.length,m.missing.length?'bad':'']]
+    document.getElementById('stiles').innerHTML=[['대상',m.tg.length,''],['입실 인증',m.inN,''],['퇴실 인증',m.outN,''],['이수',m.ok,'ok'],['확인필요',m.warn,'warn'],['중복인증',m.dupN,m.dupN?'warn':''],['미이수',m.bad,'bad'],['차수변경',m.moved,''],['미인증',m.missing.length,m.missing.length?'bad':'']]
       .map(([k,v,c])=>`<div class="tile ${c}"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
     const list=m.r.filter(x=>st.filter==='all'||x.result===st.filter);
     const tbl=document.getElementById('stbl');
     if(tbl.contains(document.activeElement) && document.activeElement.tagName==='SELECT') return; // 판정 고르는 중엔 다시 그리지 않음
-    tbl.innerHTML= !m.r.length?`<div class="empty">아직 인증한 사람이 없습니다.</div>`:`<div class="tbl-wrap"><table class="t"><thead><tr><th>연번</th><th>팀</th><th>사번</th><th>이름</th><th>사내번호</th><th>입실</th><th>퇴실</th><th>체류(분)</th><th>결과</th><th>비고</th><th>판정</th><th></th></tr></thead><tbody>
+    tbl.innerHTML= !m.r.length?`<div class="empty">아직 인증한 사람이 없습니다.</div>`:`<div class="tbl-wrap"><table class="t"><thead><tr><th>연번</th><th>부서명</th><th>사번</th><th>이름</th><th>사내번호</th><th>입실</th><th>퇴실</th><th>체류(분)</th><th>결과</th><th>비고</th><th>판정</th><th></th></tr></thead><tbody>
      ${list.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.c.team)}</td><td>${esc(x.c.empNo)}</td><td><b>${esc(x.c.name)}</b></td><td>${esc(x.c.ext)}</td><td>${hms(x.c.inAt)}</td><td>${hms(x.c.outAt)}</td><td>${x.mins??''}</td>
       <td><span class="pill ${RCLS[x.result]}">${x.result}</span></td><td class="l note">${noteHTML({blue:x.moved?'차수변경':'',notes:x.notes})}</td>
-      <td><select class="in ov" data-id="${esc(x.c.id)}" aria-label="판정"><option value="">자동(${x.auto})</option>${['이수','미이수','확인필요'].map(o=>`<option ${x.c.override===o?'selected':''}>${o}</option>`).join('')}</select></td>
+      <td><select class="in ov" data-id="${esc(x.c.id)}" aria-label="판정"><option value="">자동(${x.auto})</option>${['이수','미이수','불참','확인필요'].map(o=>`<option ${x.c.override===o?'selected':''}>${o}</option>`).join('')}</select></td>
       <td><button class="btn sm danger del" data-id="${esc(x.c.id)}" data-n="${esc(x.c.name)}">기록삭제</button></td></tr>`).join('')}</tbody></table></div>`;
     tbl.querySelectorAll('.ov').forEach(el=>el.onchange=async()=>{ const {error}=await sb.from('checkins').update({override:el.value}).eq('id',el.dataset.id); el.blur(); if(!fail(error)) loadSession(sid); });
     tbl.querySelectorAll('.del').forEach(el=>el.onclick=async()=>{ if(!await ask(el.dataset.n+'님의 출석 기록을 삭제할까요?','삭제')) return;
@@ -325,7 +328,7 @@ function mountSession(sid){
 function mountQR(sid){
   app.innerHTML=`<div class="qr-page"><img class="qr-logo" src="logo.png" alt="${esc(ORG)}"><div class="meta" id="qmeta"></div><h1 id="qtitle">불러오는 중…</h1><div class="phase ph-idle" id="qphase"></div>
    <div class="qrbox" id="qrbox"></div><div class="bar"><i id="qbar" style="width:0"></i></div>
-   <div class="muted">휴대폰 카메라로 QR을 스캔한 뒤 <b>팀·이름</b>을 선택하세요 · QR은 30초마다 바뀝니다</div>
+   <div class="muted">휴대폰 카메라로 QR을 스캔한 뒤 <b>부서·이름</b>을 선택하세요 · QR은 30초마다 바뀝니다</div>
    <div class="count" id="qcount"></div>
    <div class="row" style="margin-top:20px;justify-content:center"><button class="btn blue sm" id="qIn">입실 시작</button><button class="btn orange sm" id="qOut">퇴실 시작</button><button class="btn sm" id="qClose">마감</button><button class="btn sm" id="qFull">전체화면</button><a class="btn sm" href="#s-${esc(sid)}">관리 화면</a></div></div>`;
   const getS=()=>st.sessions.find(x=>x.id===sid);
@@ -378,10 +381,10 @@ function mountSheet(sid){
     <table style="margin-bottom:14px"><tr><th style="width:15%">교육과정</th><td class="l" colspan="3">${esc(s.course)}</td></tr>
     <tr><th>회차</th><td class="l">${esc(s.round)}</td><th style="width:15%">교육일시</th><td class="l">${esc(s.date)} ${esc(s.start)}~${esc(s.end)}</td></tr>
     <tr><th>장소</th><td class="l">${esc(s.place)}</td><th>강사</th><td class="l">${esc(s.lecturer)}</td></tr>
-    <tr><th>확인방식</th><td class="l" colspan="3">QR 전자인증(입실·퇴실 시각 자동기록, 등재 명단에서 팀·이름 선택 후 사번·사내번호 대조) · 이수기준: 입·퇴실 인증 및 체류 ${s.minMinutes}분 이상</td></tr></table>
-    <table><tr><th>연번</th><th>팀</th><th>사번</th><th>성명</th><th>사내번호</th><th>입실</th><th>퇴실</th><th>체류<br>(분)</th><th>결과</th><th>비고</th></tr>
-    ${sheetRows(s).map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.team)}</td><td>${esc(x.empNo)}</td><td>${esc(x.name)}</td><td>${esc(x.ext)}</td><td>${hms(x.inAt)}</td><td>${hms(x.outAt)}</td><td>${x.mins??''}</td><td>${esc(x.result)}</td><td class="l" style="font-size:11px">${noteHTML(x)}</td></tr>`).join('')}</table>
-    <p style="font-weight:700;margin:12px 0">대상 ${m.tg.length}명 · 참석 ${m.r.length}명 (이수 ${m.ok}명 · 확인필요 ${m.warn}명 · 미이수 ${m.bad}명${m.moved?` · 차수변경 ${m.moved}명`:''}) · 타회차 수강 ${m.other.length}명 · 불참 ${m.missing.length}명</p>
+    <tr><th>확인방식</th><td class="l" colspan="3">QR 전자인증(입실·퇴실 시각 자동기록, 등재 명단에서 부서·이름 선택 후 사번·사내번호 대조) · 이수기준: 입·퇴실 인증 및 체류 ${s.minMinutes}분 이상</td></tr></table>
+    <table class="sheet"><tr><th>연번</th><th>부서명</th><th>사번</th><th>성명</th><th>사내번호</th><th>입실</th><th>퇴실</th><th>체류(분)</th><th>결과</th><th class="memo">비고</th></tr>
+    ${sheetRows(s).map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.team)}</td><td>${esc(x.empNo)}</td><td>${esc(x.name)}</td><td>${esc(x.ext)}</td><td>${hms(x.inAt)}</td><td>${hms(x.outAt)}</td><td>${x.mins??''}</td><td>${esc(x.result)}</td><td class="l memo">${noteHTML(x)}</td></tr>`).join('')}</table>
+    <p style="font-weight:700;margin:12px 0">대상 ${m.tg.length}명 · 참석 ${m.att.length}명 (이수 ${m.att.filter(x=>x.result==='이수').length}명 · 확인필요 ${m.att.filter(x=>x.result==='확인필요').length}명 · 동일기기 중복인증 ${m.att.filter(x=>x.result==='동일기기 중복인증').length}명 · 미이수 ${m.att.filter(x=>x.result==='미이수').length}명${m.moved?` · 차수변경 ${m.moved}명`:''}) · 타회차 수강 ${m.other.length}명 · 불참 ${m.missing.length}명</p>
     <div style="display:flex;justify-content:space-between;margin-top:18px"><span>출력일시: ${stamp(Date.now())}</span><span>확인자: 인사팀 ______________ (서명)</span></div>`;
   };
   render(); loadSession(sid);
@@ -403,19 +406,19 @@ async function upsertEmployees(list){
 }
 function mountRoster(){
   app.innerHTML=shell('roster',`<div class="row between"><h1 style="font-size:20px">직원 명단</h1><div class="row"><span class="muted" id="rsum"></span><button class="btn sm" id="rcsv">명단 CSV</button></div></div>
-  <section class="card"><h2>엑셀에서 한 번에 등록</h2><p class="muted small" style="margin:6px 0 10px">엑셀에서 <b>팀이름 · 이름 · 사번 · 사내번호</b> 순서의 4개 열을 선택해 복사한 뒤 붙여넣으세요. 첫 줄이 제목행이면 건너뜁니다. 사번이 같으면 정보를 고칩니다.</p>
+  <section class="card"><h2>엑셀에서 한 번에 등록</h2><p class="muted small" style="margin:6px 0 10px">엑셀에서 <b>부서명 · 이름 · 사번 · 사내번호</b> 순서의 4개 열을 선택해 복사한 뒤 붙여넣으세요. 첫 줄이 제목행이면 건너뜁니다. 사번이 같으면 정보를 고칩니다.</p>
    <textarea class="in" id="paste" placeholder="인사팀	홍길동	20150000	2201&#10;재무팀	정우성	20150185	2301"></textarea>
    <div class="row between" style="margin-top:10px"><div class="row small"><label class="row"><input type="radio" name="pm" value="merge" checked> 기존 명단에 추가·갱신</label><label class="row"><input type="radio" name="pm" value="replace"> 전체 교체 (목록에 없는 직원은 비활성)</label></div>
    <div class="row"><span class="muted small" id="pprev"></span><button class="btn pri" id="pgo">명단 불러오기</button></div></div></section>
   <section class="card"><h2>한 명씩 추가</h2>
-   <form class="row" id="radd" style="margin-top:10px"><input class="in" id="a_team" placeholder="팀이름" list="teamlist" required><datalist id="teamlist"></datalist>
+   <form class="row" id="radd" style="margin-top:10px"><input class="in" id="a_team" placeholder="부서명" list="teamlist" required><datalist id="teamlist"></datalist>
    <input class="in" id="a_name" placeholder="이름" required><input class="in" id="a_emp" placeholder="사번" required inputmode="numeric"><input class="in" id="a_ext" placeholder="사내번호" inputmode="numeric"><button class="btn pri">추가</button></form></section>
   <section class="card"><div class="row between"><h2>등재 명단</h2><div class="row"><input class="in" id="rq" placeholder="이름·사번 검색" value="${esc(st.rq)}"><select class="in" id="rteam"></select></div></div>
    <div id="rtbl" style="margin-top:12px"></div></section>`);
   const paste=document.getElementById('paste'), prev=document.getElementById('pprev');
   paste.oninput=()=>{ const {out,bad}=parsePaste(paste.value); prev.textContent= paste.value.trim()?`${out.length}명 인식${bad.length?` · 확인 필요 줄: ${bad.slice(0,5).join(', ')}${bad.length>5?'…':''}`:''}`:''; };
   document.getElementById('pgo').onclick=async()=>{
-    const {out}=parsePaste(paste.value); if(!out.length){toast('인식된 행이 없습니다. 4개 열(팀이름·이름·사번·사내번호)인지 확인하세요.');return}
+    const {out}=parsePaste(paste.value); if(!out.length){toast('인식된 행이 없습니다. 4개 열(부서명·이름·사번·사내번호)인지 확인하세요.');return}
     const replace=document.querySelector('input[name=pm]:checked').value==='replace';
     if(replace && !await ask(`목록에 없는 기존 직원 ${st.roster.filter(e=>!out.some(o=>o.emp_no===e.empNo)).length}명을 비활성 처리하고 ${out.length}명으로 바꿉니다. 지난 출석 기록은 그대로 남습니다.`,'교체')) return;
     if(!await upsertEmployees(out)) return;
@@ -429,17 +432,17 @@ function mountRoster(){
     if(!await upsertEmployees([e])) return;
     ['a_name','a_emp','a_ext'].forEach(id=>document.getElementById(id).value=''); document.getElementById('a_name').focus(); loadAll();
   };
-  document.getElementById('rcsv').onclick=()=>download('직원명단.csv', csv([['팀이름','이름','사번','사내번호'],...st.roster.map(e=>[e.team,e.name,e.empNo,e.ext])]));
+  document.getElementById('rcsv').onclick=()=>download('직원명단.csv', csv([['부서명','이름','사번','사내번호'],...st.roster.map(e=>[e.team,e.name,e.empNo,e.ext])]));
   document.getElementById('rq').oninput=ev=>{st.rq=ev.target.value;render()};
   const rteam=document.getElementById('rteam'); rteam.onchange=()=>{st.rteam=rteam.value;render()};
   st.update=()=>{
     const tl=teams();
-    document.getElementById('rsum').textContent=`총 ${st.roster.length}명 · ${tl.length}개 팀`;
+    document.getElementById('rsum').textContent=`총 ${st.roster.length}명 · ${tl.length}개 부서`;
     document.getElementById('teamlist').innerHTML=tl.map(t=>`<option value="${esc(t)}">`).join('');
-    rteam.innerHTML=`<option value="">전체 팀</option>`+tl.map(t=>`<option ${st.rteam===t?'selected':''}>${esc(t)}</option>`).join('');
+    rteam.innerHTML=`<option value="">전체 부서</option>`+tl.map(t=>`<option ${st.rteam===t?'selected':''}>${esc(t)}</option>`).join('');
     const q=st.rq.trim(), list=st.roster.filter(e=>(!st.rteam||e.team===st.rteam)&&(!q||e.name.includes(q)||e.empNo.includes(q)));
     document.getElementById('rtbl').innerHTML= !list.length?`<div class="empty">${st.roster.length?'검색 결과가 없습니다.':'등재된 직원이 없습니다. 엑셀에서 붙여넣거나 한 명씩 추가하세요.'}</div>`:
-     `<div class="tbl-wrap"><table class="t"><thead><tr><th>연번</th><th>팀이름</th><th>이름</th><th>사번</th><th>사내번호</th><th></th></tr></thead><tbody>${list.map((e,i)=>`<tr><td>${i+1}</td><td>${esc(e.team)}</td><td><b>${esc(e.name)}</b></td><td>${esc(e.empNo)}</td><td>${esc(e.ext)}</td><td><button class="btn sm danger rdel" data-id="${esc(e.id)}" data-n="${esc(e.name)}">삭제</button></td></tr>`).join('')}</tbody></table></div>`;
+     `<div class="tbl-wrap"><table class="t"><thead><tr><th>연번</th><th>부서명</th><th>이름</th><th>사번</th><th>사내번호</th><th></th></tr></thead><tbody>${list.map((e,i)=>`<tr><td>${i+1}</td><td>${esc(e.team)}</td><td><b>${esc(e.name)}</b></td><td>${esc(e.empNo)}</td><td>${esc(e.ext)}</td><td><button class="btn sm danger rdel" data-id="${esc(e.id)}" data-n="${esc(e.name)}">삭제</button></td></tr>`).join('')}</tbody></table></div>`;
     document.querySelectorAll('.rdel').forEach(b=>b.onclick=async()=>{ if(!await ask(b.dataset.n+'님을 명단에서 뺍니다. 지난 출석 기록은 남습니다.','빼기')) return;
       const {error}=await sb.from('employees').update({active:false}).eq('id',b.dataset.id); if(!fail(error)) loadAll(); });
   };

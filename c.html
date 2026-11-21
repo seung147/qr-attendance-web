@@ -42,6 +42,7 @@ const STATUS = {
   idle:      ['아직 인증 시간이 아닙니다', '담당자가 인증을 시작하면 화면의 QR을 다시 스캔해 주세요.'],
   closed:    ['인증이 마감되었습니다', '인증을 놓쳤다면 인사팀 담당자에게 현장에서 확인받으세요.'],
   expired:   ['QR이 만료되었습니다', '교육장 화면에 떠 있는 QR을 지금 다시 스캔해 주세요. QR은 30초마다 바뀝니다.'],
+  no_checkin: ['입실 기록이 없어 퇴실 인증을 할 수 없습니다', '입실 인증이 확인되지 않아 이번 교육은 이수 처리되지 않습니다. 온라인 수강 또는 다른 차수 교육에 참석해 주세요. 문의: 인사팀'],
   no_employee:['명단에서 찾을 수 없습니다', '인사팀 담당자에게 명단 등록을 요청해 주세요.']
 };
 
@@ -59,17 +60,17 @@ function draw(ctx){
   mc.innerHTML = `<span class="m-badge" style="background:${isIn?'var(--blue)':'var(--orange)'}">${isIn?'입실 인증':'퇴실 인증'}</span>
    <h1>${fmtTitle(s.course)} ${nobr(esc(s.round))}</h1><div class="muted tnum">${esc(s.edu_date)} · ${esc(s.start_time)}~${esc(s.end_time)} · ${esc(s.place)}</div>
    <form id="mf" style="display:flex;flex-direction:column;gap:14px">
-    <label class="f">팀이름<select class="in" id="c_team" required><option value="">팀을 선택하세요</option>${teams.map(t=>`<option>${esc(t)}</option>`).join('')}</select></label>
-    <label class="f">이름<select class="in" id="c_name" required disabled><option value="">먼저 팀을 선택하세요</option></select></label>
+    <label class="f">부서명<select class="in" id="c_team" required><option value="">부서를 선택하세요</option>${teams.map(t=>`<option>${esc(t)}</option>`).join('')}</select></label>
+    <label class="f">이름<select class="in" id="c_name" required disabled><option value="">먼저 부서를 선택하세요</option></select></label>
     <label class="f">사번 입력(숫자만)<input class="in" id="c_check" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="예) 20150000" required></label>
     <label class="f">사내전화번호 입력<input class="in" id="c_ext" inputmode="numeric" autocomplete="off" placeholder="본인 사내전화번호를 입력하세요" required></label>
     <div id="c_err"></div>
     <button class="m-submit" id="c_go" disabled>${isIn?'입실':'퇴실'} 인증하기</button></form>
    <div class="muted small" style="text-align:center" id="c_left"></div>
-   <div class="m-legal">· 수집 항목: 팀, 이름, 사번, 사내전화번호, 인증 시각, 기기 식별값(대리 인증 확인용)<br>· 수집 목적: 법정의무교육 이수 확인<br>· 보관 기간: 3년 후 파기 (남녀고용평등법 제33조, 개인정보 보호법 제15조제1항제2호)<br>· 본인 이외의 다른 사람을 대신 인증하면 안 됩니다.</div>`;
+   <div class="m-legal">· 수집 항목: 부서명, 이름, 사번, 사내전화번호, 인증 시각, 기기 식별값(대리 인증 확인용)<br>· 수집 목적: 법정의무교육 이수 확인<br>· 보관 기간: 3년 후 파기 (남녀고용평등법 제33조, 개인정보 보호법 제15조제1항제2호)<br>· 본인 이외의 다른 사람을 대신 인증하면 안 됩니다.</div>`;
   const team = document.getElementById('c_team'), name = document.getElementById('c_name'), go = document.getElementById('c_go');
   const fillNames = () => {
-    name.innerHTML = `<option value="">${team.value?'이름을 선택하세요':'먼저 팀을 선택하세요'}</option>` +
+    name.innerHTML = `<option value="">${team.value?'이름을 선택하세요':'먼저 부서를 선택하세요'}</option>` +
       roster.filter(e => e.team === team.value).map(e => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('');
     name.disabled = !team.value; showInfo();
   };
