@@ -27,6 +27,8 @@ const pad = n => String(n).padStart(2,'0');
 const hms = t => { if(!t) return ''; const d=new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
 const stamp = t => { const d=new Date(t); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const cleanId = s => String(s||'').trim().replace(/[^A-Za-z0-9_\-]/g,'');
+// 사내전화번호: 엑셀이 앞자리 0을 지운 경우(162) 4자리(0162)로 복원
+const fixExt = v => { v=String(v||'').trim(); return /^\d{1,3}$/.test(v) ? v.padStart(4,'0') : v; };
 const ms = v => v ? Date.parse(v) : null;
 const PHASE = { idle:['대기','p-idle'], in:['입실 인증 중','p-in'], out:['퇴실 인증 중','p-out'], closed:['마감','p-idle'] };
 const RCLS = {'이수':'p-ok','확인필요':'p-warn','동일기기 중복인증':'p-warn','미이수':'p-bad','불참':'p-bad'};
@@ -434,7 +436,7 @@ function parsePaste(text){
   text.split(/\r?\n/).forEach((line,i)=>{ if(!line.trim()) return;
     if(i===0 && /사번|이름|성명/.test(line)) return;
     const [team,name,empRaw,ext]=line.split(line.includes('\t')?'\t':',').map(x=>x.trim()); const empNo=cleanId(empRaw);
-    if(!team||!name||!empNo) bad.push(i+1); else out.push({team,name,emp_no:empNo,ext:ext||'',active:true});
+    if(!team||!name||!empNo) bad.push(i+1); else out.push({team,name,emp_no:empNo,ext:fixExt(ext),active:true});
   });
   const map=new Map(out.map(e=>[e.emp_no,e])); return {out:[...map.values()],bad};
 }
@@ -450,7 +452,7 @@ function mountRoster(){
    <div class="row"><span class="muted small" id="pprev"></span><button class="btn pri" id="pgo">명단 불러오기</button></div></div></section>
   <section class="card"><h2>한 명씩 추가</h2>
    <form class="row" id="radd" style="margin-top:10px"><input class="in" id="a_team" placeholder="부서명" list="teamlist" required><datalist id="teamlist"></datalist>
-   <input class="in" id="a_name" placeholder="이름" required><input class="in" id="a_emp" placeholder="사번" required inputmode="numeric"><input class="in" id="a_ext" placeholder="사내번호" inputmode="numeric"><button class="btn pri">추가</button></form></section>
+   <input class="in" id="a_name" placeholder="이름" required><input class="in" id="a_emp" placeholder="사번" required inputmode="numeric"><input class="in" id="a_ext" placeholder="사내번호(4자리)" inputmode="numeric" maxlength="4"><button class="btn pri">추가</button></form></section>
   <section class="card"><div class="row between"><h2>등재 명단</h2><div class="row"><input class="in" id="rq" placeholder="이름·사번 검색" value="${esc(st.rq)}"><select class="in" id="rteam"></select></div></div>
    <div id="rtbl" style="margin-top:12px"></div></section>`);
   const paste=document.getElementById('paste'), prev=document.getElementById('pprev');
@@ -466,7 +468,7 @@ function mountRoster(){
   };
   document.getElementById('radd').onsubmit=async ev=>{
     ev.preventDefault(); const g=id=>document.getElementById(id).value.trim();
-    const e={team:g('a_team'),name:g('a_name'),emp_no:cleanId(g('a_emp')),ext:g('a_ext'),active:true}; if(!e.emp_no){toast('사번은 숫자·영문만 쓸 수 있습니다');return}
+    const e={team:g('a_team'),name:g('a_name'),emp_no:cleanId(g('a_emp')),ext:fixExt(g('a_ext')),active:true}; if(!e.emp_no){toast('사번은 숫자·영문만 쓸 수 있습니다');return}
     if(!await upsertEmployees([e])) return;
     ['a_name','a_emp','a_ext'].forEach(id=>document.getElementById(id).value=''); document.getElementById('a_name').focus(); loadAll();
   };

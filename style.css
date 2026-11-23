@@ -148,3 +148,9 @@ a.sess:hover h3{color:var(--blue)}
 .combo-list li.on,.combo-list li:hover{background:var(--soft)}
 .combo-list li.none{color:var(--muted);cursor:default}
 .combo-list mark{background:#fff1a8;color:inherit;border-radius:2px}
+/* 모바일 입력칸 높이 통일 */
+.m-card .in{height:52px;padding:0 14px;line-height:normal}
+.m-card select.in{padding-right:36px}
+/* 대리 인증 경고 */
+.m-warn{background:#fff4e5;border:1.5px solid #f0a040;border-radius:10px;padding:12px 14px;color:#8a4b00;font-size:14px;line-height:1.5}
+.m-warn b{display:block;font-size:16px;color:#b25e00;margin-bottom:2px}

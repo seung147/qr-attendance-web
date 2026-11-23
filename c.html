@@ -62,12 +62,13 @@ function draw(ctx){
    <form id="mf" style="display:flex;flex-direction:column;gap:14px">
     <label class="f">부서명<select class="in" id="c_team" required><option value="">부서를 선택하세요</option>${teams.map(t=>`<option>${esc(t)}</option>`).join('')}</select></label>
     <label class="f">이름<select class="in" id="c_name" required disabled><option value="">먼저 부서를 선택하세요</option></select></label>
-    <label class="f">사번 입력(숫자만)<input class="in" id="c_check" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="예) 20150000" required></label>
-    <label class="f">사내전화번호 입력<input class="in" id="c_ext" inputmode="numeric" autocomplete="off" placeholder="본인 사내전화번호를 입력하세요" required></label>
+    <label class="f">사번 입력(숫자만)<input class="in" id="c_check" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="예) 2150001" required></label>
+    <label class="f">사내전화번호 입력(4자리)<input class="in" id="c_ext" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" placeholder="예) 0162" required></label>
+    <div class="m-warn" role="note"><b>⚠ 반드시 본인만 인증하세요</b>다른 사람을 대신 인증하면 안 됩니다. 대리 인증 여부는 기기 기록으로 확인됩니다.</div>
     <div id="c_err"></div>
     <button class="m-submit" id="c_go" disabled>${isIn?'입실':'퇴실'} 인증하기</button></form>
    <div class="muted small" style="text-align:center" id="c_left"></div>
-   <div class="m-legal">· 수집 항목: 부서명, 이름, 사번, 사내전화번호, 인증 시각, 기기 식별값(대리 인증 확인용)<br>· 수집 목적: 법정의무교육 이수 확인<br>· 보관 기간: 3년 후 파기 (남녀고용평등법 제33조, 개인정보 보호법 제15조제1항제2호)<br>· 본인 이외의 다른 사람을 대신 인증하면 안 됩니다.</div>`;
+   <div class="m-legal">· 수집 항목: 부서명, 이름, 사번, 사내전화번호, 인증 시각, 기기 식별값(대리 인증 확인용)<br>· 수집 목적: 법정의무교육 이수 확인<br>· 보관 기간: 3년 후 파기 (남녀고용평등법 제33조, 개인정보 보호법 제15조제1항제2호)</div>`;
   const team = document.getElementById('c_team'), name = document.getElementById('c_name'), go = document.getElementById('c_go');
   const fillNames = () => {
     name.innerHTML = `<option value="">${team.value?'이름을 선택하세요':'먼저 부서를 선택하세요'}</option>` +
@@ -79,6 +80,7 @@ function draw(ctx){
     go.disabled = !e;
   };
   document.getElementById('c_check').oninput = ev => { ev.target.value = ev.target.value.replace(/\D/g, ''); };
+  document.getElementById('c_ext').oninput = ev => { ev.target.value = ev.target.value.replace(/\D/g, '').slice(0, 4); };
   team.onchange = fillNames; name.onchange = () => { showInfo(); document.getElementById('c_ext').value = ''; document.getElementById('c_check').value = ''; };
   const pre = roster.find(e => e.id === store.get('att_emp')); // 이 폰에서 지난번 고른 사람
   if(pre){ team.value = pre.team; fillNames(); name.value = pre.id; showInfo(); }
@@ -96,6 +98,7 @@ function draw(ctx){
     const e = roster.find(x => x.id === name.value); if(!e) return;
     const empNo = document.getElementById('c_check').value.trim(), ext = document.getElementById('c_ext').value.trim();
     if(!empNo || !ext){ err.innerHTML = `<div class="m-err">사번과 사내전화번호를 모두 입력해 주세요.</div>`; return; }
+    if(ext.length !== 4){ err.innerHTML = `<div class="m-err">사내전화번호는 4자리 숫자로 입력해 주세요. 예) 0162</div>`; return; }
     go.disabled = true; go.textContent = '인증 중…';
     const { data, error } = await sb.rpc('checkin_submit', {
       p_session: SID, p_token: TOKEN, p_employee: e.id, p_device: device, p_ext: ext,
