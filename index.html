@@ -206,9 +206,9 @@ function mountList(){
     const list=st.sessions.slice().sort((a,b)=>(b.date+b.start).localeCompare(a.date+a.start));
     if(!list.length){ el.innerHTML=`<div class="empty">아직 만든 회차가 없습니다. [+ 새 회차 만들기]로 첫 교육을 등록하세요.</div>`; return; }
     el.innerHTML=list.map(s=>{const m=summary(s),ph=PHASE[s.phase]||PHASE.idle;return`
-      <div class="sess"><div><h3>${esc(s.course)} <span style="color:var(--blue)">${esc(s.round)}</span></h3>
+      <a class="sess" href="#s-${esc(s.id)}"><div><h3>${esc(s.course)} <span style="color:var(--blue)">${esc(s.round)}</span></h3>
       <div class="muted small tnum">${esc(s.date)} ${esc(s.start)}~${esc(s.end)} · ${esc(s.place)} · 대상 ${m.tg.length}명 · 입실 ${m.inN} · 이수 ${m.ok} · 확인필요 ${m.warn} · 미인증 ${m.missing.length}</div></div>
-      <div class="row"><span class="pill ${ph[1]}">${ph[0]}</span><a class="btn sm" href="#s-${esc(s.id)}">열기</a></div></div>`}).join('');
+      <div class="row"><span class="pill ${ph[1]}">${ph[0]}</span><span class="chev" aria-hidden="true">›</span></div></a>`}).join('');
   };
   render();
 }
@@ -259,7 +259,7 @@ function mountSession(sid){
    <div id="stbl" style="margin-top:12px"></div></section>
   <section class="card"><h2>미인증 대상자 <span id="mcount" class="muted small"></span></h2><div id="miss" style="margin-top:10px"></div></section>
   <section class="card"><h2>관리자 수동 등록</h2><p class="muted small" style="margin:6px 0 10px">휴대폰이 없거나 인증에 실패한 직원을 담당자가 직접 확인해 등록합니다. 비고에 "수동등록"으로 남습니다.</p>
-   <form class="row" id="mform"><select class="in" id="m_emp" style="min-width:220px"></select>
+   <form class="row" id="mform"><div class="combo" id="m_combo"><input class="in" id="m_q" placeholder="직원 검색 (이름·사번·부서)" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="m_list" aria-autocomplete="list"><input type="hidden" id="m_emp"><ul class="combo-list" id="m_list" role="listbox" hidden></ul></div>
    <select class="in" id="m_ph"><option value="in">입실</option><option value="out">퇴실</option></select>
    <input class="in" type="time" step="1" id="m_time" title="비우면 지금 시각">
    <input class="in" id="m_reason" placeholder="사유 예) 휴대폰 미지참, 현장 확인" style="flex:1;min-width:200px">
@@ -276,9 +276,9 @@ function mountSession(sid){
     const patch= ph==='in'?{in_at:t.toISOString(),in_device:null,in_manual:reason}:{out_at:t.toISOString(),out_device:null,out_manual:reason};
     const {error}= ex ? await sb.from('checkins').update(patch).eq('id',ex.id)
                       : await sb.from('checkins').insert({session_id:sid,emp_no:emp.empNo,team:emp.team,name:emp.name,ext:emp.ext,...patch});
-    if(fail(error)) return; toast(`${emp.name} ${ph==='in'?'입실':'퇴실'} 수동 등록했습니다.`); document.getElementById('m_reason').value=''; loadSession(sid);
+    if(fail(error)) return; toast(`${emp.name} ${ph==='in'?'입실':'퇴실'} 수동 등록했습니다.`); document.getElementById('m_reason').value=''; clearCombo(); loadSession(sid);
   };
-  let lastKey='';
+  setupCombo();
   st.update=()=>{
     const s=getS(), head=document.getElementById('shead'); if(!head) return;
     if(!s){ head.innerHTML=`<div class="card empty">회차를 찾을 수 없습니다. <a href="#sessions">목록으로</a></div>`; return; }
@@ -317,11 +317,40 @@ function mountSession(sid){
     document.getElementById('mcount').textContent=`(${m.missing.length}명)`;
     document.getElementById('miss').innerHTML=(m.missing.length?`<div class="chips">${m.missing.map(e=>`<span class="chip">${esc(e.team)} · ${esc(e.name)} <span class="muted tnum">${esc(e.empNo)}</span></span>`).join('')}</div>`:`<div class="muted">대상자 전원이 인증했습니다.</div>`)
       +(m.other.length?`<div class="small" style="margin-top:12px">다른 회차에서 수강 ${m.other.length}명: <span class="blue">${m.other.map(o=>esc(o.e.name)+'('+esc(o.round)+')').join(', ')}</span></div>`:'');
-    const key=st.roster.map(e=>e.empNo).join();
-    if(key!==lastKey){ lastKey=key; document.getElementById('m_emp').innerHTML=`<option value="">직원 선택</option>`+teams().map(t=>`<optgroup label="${esc(t)}">${st.roster.filter(e=>e.team===t).map(e=>`<option value="${esc(e.empNo)}">${esc(e.name)} (${esc(e.empNo)})</option>`).join('')}</optgroup>`).join(''); }
   };
   render(); loadSession(sid);
   st.poll=setInterval(()=>{ if(!document.hidden) loadSession(sid); },5000);
+}
+
+/* ---------- 직원 검색 선택 (수동 등록용) ---------- */
+function clearCombo(){ const q=document.getElementById('m_q'); if(!q) return; q.value=''; document.getElementById('m_emp').value=''; }
+function setupCombo(){
+  const q=document.getElementById('m_q'), hid=document.getElementById('m_emp'), list=document.getElementById('m_list');
+  let items=[], active=-1;
+  const hl=(t,k)=>{ t=esc(t); if(!k) return t; const i=t.indexOf(esc(k)); return i<0?t:t.slice(0,i)+'<mark>'+t.slice(i,i+esc(k).length)+'</mark>'+t.slice(i+esc(k).length); };
+  function open(){
+    const k=q.value.trim(); const ks=k.split(/\s+/).filter(Boolean);
+    items=st.roster.filter(e=>ks.every(w=>(e.name+' '+e.empNo+' '+e.team).includes(w))).slice(0,50);
+    active=items.length?0:-1;
+    list.innerHTML= items.length ? items.map((e,i)=>`<li role="option" id="m_opt${i}" data-i="${i}" class="${i===active?'on':''}"><b>${hl(e.name,ks[0]||'')}</b><span>${hl(e.team,ks[0]||'')} · ${hl(e.empNo,ks[0]||'')}</span></li>`).join('')
+      : `<li class="none">검색 결과가 없습니다</li>`;
+    list.hidden=false; q.setAttribute('aria-expanded','true');
+  }
+  function close(){ list.hidden=true; q.setAttribute('aria-expanded','false'); }
+  function pick(i){ const e=items[i]; if(!e) return; hid.value=e.empNo; q.value=`${e.name} (${e.team} · ${e.empNo})`; close(); }
+  function move(d){ if(!items.length) return; active=(active+d+items.length)%items.length;
+    list.querySelectorAll('li').forEach((li,i)=>li.classList.toggle('on',i===active));
+    const el=document.getElementById('m_opt'+active); el&&el.scrollIntoView({block:'nearest'}); q.setAttribute('aria-activedescendant','m_opt'+active); }
+  q.addEventListener('focus',()=>{ if(!hid.value) open(); });
+  q.addEventListener('input',()=>{ hid.value=''; open(); });
+  q.addEventListener('keydown',ev=>{
+    if(ev.key==='ArrowDown'){ ev.preventDefault(); list.hidden?open():move(1); }
+    else if(ev.key==='ArrowUp'){ ev.preventDefault(); move(-1); }
+    else if(ev.key==='Enter' && !list.hidden){ ev.preventDefault(); pick(active); }
+    else if(ev.key==='Escape'){ close(); }
+  });
+  list.addEventListener('mousedown',ev=>{ const li=ev.target.closest('li[data-i]'); if(li){ ev.preventDefault(); pick(+li.dataset.i); } });
+  q.addEventListener('blur',()=>setTimeout(close,100));
 }
 
 /* ---------- QR 화면 (빔프로젝터) ---------- */
@@ -337,13 +366,23 @@ function mountQR(sid){
   document.getElementById('qClose').onclick=()=>setPhase(sid,'closed');
   document.getElementById('qFull').onclick=()=>document.documentElement.requestFullscreen?.().catch(()=>{});
   const base=location.href.split('#')[0].replace(/[^/]*$/,'');
-  let token='', nextAt=0, drawn='', fetching=false;
+  // 게이지: 새 QR이 뜨는 순간 100%에서 시작 → 0%가 되는 순간 다음 QR로 교체
+  let token='', nextAt=0, total=30000, drawn='', fetching=false;
   async function refreshToken(){
     if(fetching) return; fetching=true;
     const {data,error}=await sb.rpc('qr_token',{p_session:sid}); fetching=false;
-    if(error){ console.error(error); nextAt=Date.now()+3000; return; }
-    token=data.token; nextAt=Date.now()+data.next_in*1000+300; render();
+    if(error){ console.error(error); nextAt=Date.now()+3000; total=3000; return; }
+    total=Math.max(1000, data.next_in*1000);   // 서버 기준으로 이 QR이 바뀌기까지 남은 시간
+    nextAt=Date.now()+total; token=data.token; render();
   }
+  const bar=document.getElementById('qbar');
+  (function frame(){
+    if(!location.hash.startsWith('#qr-')) return;
+    const s=getS(), live=s&&(s.phase==='in'||s.phase==='out')&&token;
+    const left=nextAt-Date.now();
+    bar.style.width= live ? Math.max(0,Math.min(100,left/total*100))+'%' : '0';
+    requestAnimationFrame(frame);
+  })();
   st.update=()=>{
     const s=getS(); if(!s) return;
     const m=summary(s), live=s.phase==='in'||s.phase==='out';
@@ -361,11 +400,10 @@ function mountQR(sid){
   render(); loadSession(sid); refreshToken();
   let tick=0;
   st.poll=setInterval(()=>{
-    const s=getS(), live=s&&(s.phase==='in'||s.phase==='out'), left=nextAt-Date.now();
-    document.getElementById('qbar').style.width= live&&token ? Math.max(0,Math.min(100,left/300))+'%' : '0';
-    if(live && left<=0) refreshToken();
-    if(++tick%5===0) loadSession(sid);
-  },1000);
+    const s=getS(), live=s&&(s.phase==='in'||s.phase==='out');
+    if(live && nextAt-Date.now()<=0) refreshToken();
+    if(++tick%20===0) loadSession(sid);   // 인원수는 5초마다 갱신
+  },250);
 }
 
 /* ---------- 출석부 인쇄 ---------- */
