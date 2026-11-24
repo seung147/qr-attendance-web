@@ -193,3 +193,8 @@ a.sess:hover h3{color:var(--blue)}
 .dist-b i{display:block;height:100%;background:var(--blue);-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .sv-texts{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
 @media (max-width:760px){.sv-q{grid-template-columns:1fr}}
+/* 이수 현황 출력: 결과와 회차·날짜를 한 줄로 */
+@media print{
+  table.status-t td{white-space:nowrap}
+  table.status-t td .sub{display:inline;margin:0 0 0 4px;font-size:10px}
+}
