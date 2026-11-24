@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>교육 설문</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+<div class="m-page"><div class="m-org"><img src="logo.png" alt="대륜E&amp;S"><span>교육 설문</span></div><div class="m-card" id="mc"><div class="muted">불러오는 중…</div></div></div>
+<script>
+const CFG = window.APP_CONFIG || {};
+const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, { auth: { persistSession: false } });
+const mc = document.getElementById('mc');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const store = { get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }, set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} } };
+// 출석용과 다른 임의값: 설문 응답이 출석 기록과 연결되지 않도록(익명)
+let device = store.get('svy_device');
+if(!device){ device = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)+String(Date.now()); store.set('svy_device', device); }
+const SID = new URLSearchParams(location.hash.slice(1)).get('s');
+const msg = (t,b) => { mc.innerHTML = `<h1>${t}</h1><p class="muted">${b}</p>`; };
+const LABELS = ['매우 그렇지 않다','그렇지 않다','보통','그렇다','매우 그렇다'];
+
+async function start(){
+  if(!SID) return msg('QR을 스캔해서 들어와 주세요','교육장 화면의 설문 QR로 들어와야 응답할 수 있습니다.');
+  if(store.get('svy_done_'+SID)) return done(true);
+  const { data, error } = await sb.rpc('survey_context', { p_session: SID });
+  if(error) return msg('연결하지 못했습니다','네트워크를 확인한 뒤 다시 시도해 주세요.');
+  if(data.status === 'closed') return msg('설문 기간이 아닙니다','설문이 아직 열리지 않았거나 마감되었습니다.');
+  if(data.status !== 'ok') return msg('설문을 찾을 수 없습니다','인사팀에 문의해 주세요.');
+  draw(data);
+}
+
+function draw(d){
+  const qs = d.questions || [];
+  mc.innerHTML = `<span class="m-badge" style="background:var(--blue)">익명 설문</span>
+   <h1>${esc(d.title)}</h1><div class="muted">${esc(d.course)} ${esc(d.round)}</div>
+   <p class="small muted" style="margin:0">이름은 수집하지 않습니다. 솔직한 의견을 부탁드려요. (약 1분)</p>
+   <form id="sf" style="display:flex;flex-direction:column;gap:22px">
+   ${qs.map((q,i)=> q.type==='text'
+     ? `<div class="sq"><p class="sq-t">${i+1}. ${esc(q.text)} <span class="muted small">(선택)</span></p><textarea class="in" id="q${i}" maxlength="500" rows="3" placeholder="자유롭게 적어 주세요"></textarea></div>`
+     : `<div class="sq" id="box${i}"><p class="sq-t">${i+1}. ${esc(q.text)}</p><div class="scale">${[1,2,3,4,5].map(v=>`<label><input type="radio" name="q${i}" value="${v}"><span>${v}</span></label>`).join('')}</div><div class="scale-l"><span>${LABELS[0]}</span><span>${LABELS[4]}</span></div></div>`).join('')}
+   <div id="err"></div>
+   <button class="m-submit" id="go">제출하기</button></form>`;
+  document.getElementById('sf').onchange = () => { document.getElementById('err').innerHTML=''; };
+  document.getElementById('sf').onsubmit = async ev => {
+    ev.preventDefault();
+    const err = document.getElementById('err'); err.innerHTML='';
+    const answers = qs.map((q,i)=> q.type==='text'
+      ? (document.getElementById('q'+i).value.trim().slice(0,500) || null)
+      : (Number((document.querySelector(`input[name=q${i}]:checked`)||{}).value) || null));
+    const miss = qs.findIndex((q,i)=> q.type!=='text' && !answers[i]);
+    if(miss >= 0){ err.innerHTML = `<div class="m-err">${miss+1}번 문항에 답해 주세요.</div>`; document.getElementById('box'+miss).scrollIntoView({behavior:'smooth',block:'center'}); return; }
+    const go = document.getElementById('go'); go.disabled = true; go.textContent = '제출 중…';
+    const { data, error } = await sb.rpc('survey_submit', { p_session: SID, p_device: device, p_answers: answers });
+    if(error || data.status === 'bad'){ go.disabled=false; go.textContent='제출하기'; err.innerHTML = `<div class="m-err">제출하지 못했습니다. 다시 눌러 주세요.</div>`; return; }
+    if(data.status === 'closed') return msg('설문이 마감되었습니다','참여해 주셔서 감사합니다.');
+    store.set('svy_done_'+SID, '1'); done(data.status === 'already');
+  };
+}
+function done(already){
+  mc.innerHTML = `<div class="m-done"><div class="big">🙏</div><h1 style="margin-top:12px">${already?'이미 응답하셨습니다':'응답해 주셔서 감사합니다'}</h1><p class="muted">보내 주신 의견은 다음 교육을 준비하는 데 반영하겠습니다.</p></div>`;
+}
+start();
+</script>
+</body>
+</html>

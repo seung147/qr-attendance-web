@@ -116,6 +116,13 @@ function draw(ctx){
       <p style="font-size:17px;margin:12px 0 4px"><b>${esc(data.name)}</b> · ${esc(data.team)}</p>
       <p class="muted tnum" style="margin:0">${ph} 시각 ${hms(data.at)}</p>
       ${data.phase==='in'?`<p class="muted small" style="margin-top:16px">교육이 끝나면 퇴실 QR을 한 번 더 스캔해야 이수로 인정됩니다.</p>`:''}</div>`;
+    if(data.phase === 'out'){ // 설문이 열려 있으면 바로 참여 버튼
+      const sv = await sb.rpc('survey_context', { p_session: SID });
+      if(sv.data && sv.data.status === 'ok'){
+        const a = document.createElement('a'); a.className = 'm-submit'; a.style.cssText = 'display:block;text-align:center;text-decoration:none;margin-top:8px;background:#1f7a45';
+        a.href = 's.html#s=' + encodeURIComponent(SID); a.textContent = '교육 설문 참여하기 (1분)'; mc.appendChild(a);
+      }
+    }
   };
 }
 start();
