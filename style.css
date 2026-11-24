@@ -154,3 +154,20 @@ a.sess:hover h3{color:var(--blue)}
 /* 대리 인증 경고 */
 .m-warn{background:#fff4e5;border:1.5px solid #f0a040;border-radius:10px;padding:12px 14px;color:#8a4b00;font-size:14px;line-height:1.5}
 .m-warn b{display:block;font-size:16px;color:#b25e00;margin-bottom:2px}
+/* 이수 현황 */
+.status-t td .sub{font-size:11.5px;color:var(--muted);margin-top:3px;white-space:nowrap}
+.fin-ok{color:var(--ok)} .fin-no{color:var(--bad)}
+.print-only{display:none}
+@media print{
+  .no-print,.topbar{display:none!important}
+  .wrap{padding:0;max-width:none}
+  .print-area{border:0;padding:0}
+  .print-only{display:block;margin-bottom:6px}
+  .tbl-wrap{overflow:visible;border:0}
+  table.status-t{font-size:11px}
+  table.status-t th{background:#dde8f4!important;color:#111!important;padding:5px 4px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  table.status-t td{padding:4px;border:1px solid #999}
+  table.status-t th{border:1px solid #999}
+  table.status-t tr{break-inside:avoid}
+  .pill{-webkit-print-color-adjust:exact;print-color-adjust:exact;padding:1px 6px;font-size:10.5px}
+}
