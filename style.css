@@ -198,3 +198,5 @@ a.sess:hover h3{color:var(--blue)}
   table.status-t td{white-space:nowrap}
   table.status-t td .sub{display:inline;margin:0 0 0 4px;font-size:10px}
 }
+/* 이수 현황 열 필터 */
+.thf{margin-top:6px;font:inherit;font-size:12px;font-weight:500;padding:3px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.95);color:var(--ink);max-width:120px}

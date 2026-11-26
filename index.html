@@ -584,7 +584,7 @@ function statusData(year){
 function mountStatus(){
   const years=[...new Set(st.sessions.map(s=>String(s.date).slice(0,4)))].sort().reverse();
   if(!st.sYear||!years.includes(st.sYear)) st.sYear=years[0]||String(new Date().getFullYear());
-  st.sCourses=st.sCourses||null; st.sTeam=st.sTeam||''; st.sState=st.sState||''; st.sQ=st.sQ||'';
+  st.sCourses=st.sCourses||null; st.sTeam=st.sTeam||''; st.sState=st.sState||''; st.sQ=st.sQ||''; st.sCF=st.sCF||{};
   app.innerHTML=shell('status',`
   <div class="row between no-print"><h1 style="font-size:20px">법정교육 이수 현황</h1>
    <div class="row"><button class="btn" id="stMail">✉ 미완료자 메일</button><button class="btn" id="stCsv">엑셀(CSV) 다운로드</button><button class="btn pri" id="stPrint">인쇄 / PDF 저장</button></div></div>
@@ -598,7 +598,7 @@ function mountStatus(){
   <div class="tiles no-print" id="stTiles"></div>
   <section class="card print-area"><div id="stHead"></div><div id="stTbl"></div><div id="stFoot"></div></section>`);
   const fYear=document.getElementById('fYear'), fTeam=document.getElementById('fTeam'), fState=document.getElementById('fState'), fQ=document.getElementById('fQ');
-  fYear.onchange=()=>{ st.sYear=fYear.value; st.sCourses=null; render(); };
+  fYear.onchange=()=>{ st.sYear=fYear.value; st.sCourses=null; st.sCF={}; render(); };
   fTeam.onchange=()=>{ st.sTeam=fTeam.value; render(); };
   fState.value=st.sState; fState.onchange=()=>{ st.sState=fState.value; render(); };
   fQ.oninput=()=>{ st.sQ=fQ.value; render(); };
@@ -609,7 +609,9 @@ function mountStatus(){
     const sel=courses.filter(c=>st.sCourses.includes(c));
     const all=st.roster.map(e=>{ const cells=sel.map(c=>best[c]?.[e.empNo]||null); return {e,cells,done:sel.length>0&&cells.every(x=>x&&x.result==='이수')}; });
     const q=st.sQ.trim();
-    const list=all.filter(r=>(!st.sTeam||r.e.team===st.sTeam)&&(!q||r.e.name.includes(q)||r.e.empNo.includes(q))&&(!st.sState||(st.sState==='done'?r.done:!r.done)));
+    const cfOk=r=>sel.every((c,i)=>{ const f=st.sCF[c]; if(!f) return true; const res=r.cells[i]?r.cells[i].result:'미참석';
+      return f==='not'? res!=='이수' : f==='확인필요'? (res==='확인필요'||res==='동일기기 중복인증') : res===f; });
+    const list=all.filter(r=>(!st.sTeam||r.e.team===st.sTeam)&&(!q||r.e.name.includes(q)||r.e.empNo.includes(q))&&(!st.sState||(st.sState==='done'?r.done:!r.done))&&cfOk(r));
     return {courses,sel,all,list};
   }
   const cellText=x=>!x?'미참석':x.result;
@@ -632,14 +634,17 @@ function mountStatus(){
     document.getElementById('stTiles').innerHTML=[`<div class="tile ok"><div class="k">최종 완료</div><div class="v">${doneN}<span class="small muted"> / ${n}명</span></div></div>`,
       `<div class="tile bad"><div class="k">미완료</div><div class="v">${n-doneN}</div></div>`,
       ...sel.map((c,i)=>{ const ok=all.filter(r=>r.cells[i]?.result==='이수').length; return `<div class="tile"><div class="k">${esc(shortCourse(c))}</div><div class="v">${n?Math.round(ok/n*100):0}%<span class="small muted"> ${ok}/${n}</span></div></div>`; })].join('');
-    const filt=[st.sTeam&&`부서: ${st.sTeam}`, st.sState&&(st.sState==='done'?'완료만':'미완료만'), st.sQ.trim()&&`검색: ${st.sQ.trim()}`].filter(Boolean).join(' · ');
+    const cfLab={'이수':'이수','not':'이수 아님','미참석':'미참석','미이수':'미이수','확인필요':'확인필요','불참':'불참'};
+    const filt=[st.sTeam&&`부서: ${st.sTeam}`, st.sState&&(st.sState==='done'?'완료만':'미완료만'), st.sQ.trim()&&`검색: ${st.sQ.trim()}`, ...sel.filter(c=>st.sCF[c]).map(c=>`${shortCourse(c)}: ${cfLab[st.sCF[c]]}`)].filter(Boolean).join(' · ');
     document.getElementById('stHead').innerHTML=`<div class="print-only"><img src="logo.png" alt="${esc(ORG)}" style="height:22px"></div>
       <div class="row between" style="margin-bottom:10px"><h2>${esc(st.sYear)}년 법정교육 이수 현황</h2><span class="small muted tnum">${filt?esc(filt)+' · ':''}${list.length}명 · 출력일시 ${stamp(Date.now())}</span></div>`;
-    document.getElementById('stTbl').innerHTML= !sel.length?`<div class="empty">교육과정을 하나 이상 선택하세요.</div>` : !list.length?`<div class="empty">조건에 맞는 직원이 없습니다.</div>` :
-     `<div class="tbl-wrap"><table class="t status-t"><thead><tr><th>연번</th><th>부서명</th><th>이름</th><th>사번</th>${sel.map(c=>`<th>${esc(shortCourse(c))}</th>`).join('')}<th>최종</th></tr></thead><tbody>
+    document.getElementById('stTbl').innerHTML= !sel.length?`<div class="empty">교육과정을 하나 이상 선택하세요.</div>` : !list.length?`<div class="empty">조건에 맞는 직원이 없습니다. <button class="btn sm" id="cfReset">필터 모두 해제</button></div>` :
+     `<div class="tbl-wrap"><table class="t status-t"><thead><tr><th>연번</th><th>부서명</th><th>이름</th><th>사번</th>${sel.map(c=>`<th>${esc(shortCourse(c))}<br><select class="thf no-print" data-c="${esc(c)}" aria-label="${esc(shortCourse(c))} 결과 필터">${[['','전체'],['이수','이수'],['not','이수 아님'],['미참석','미참석'],['미이수','미이수'],['확인필요','확인필요'],['불참','불참']].map(([v,t])=>`<option value="${v}" ${(st.sCF[c]||'')===v?'selected':''}>${t}</option>`).join('')}</select></th>`).join('')}<th>최종</th></tr></thead><tbody>
       ${list.map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.e.team)}</td><td><b>${esc(r.e.name)}</b></td><td>${esc(r.e.empNo)}</td>
         ${r.cells.map(x=>`<td><span class="pill ${x?(RCLS[x.result]||'p-idle'):'p-idle'}">${esc(cellText(x))}</span>${x?`<div class="sub">${esc(cellSub(x))}</div>`:''}</td>`).join('')}
         <td><b class="${r.done?'fin-ok':'fin-no'}">${r.done?'완료':'미완료'}</b></td></tr>`).join('')}</tbody></table></div>`;
+    document.querySelectorAll('.thf').forEach(el=>el.onchange=()=>{ st.sCF[el.dataset.c]=el.value; render(); });
+    const rs=document.getElementById('cfReset'); if(rs) rs.onclick=()=>{ st.sCF={}; st.sTeam=''; st.sState=''; st.sQ=''; fQ.value=''; fState.value=''; render(); };
     document.getElementById('stFoot').innerHTML=`<div class="row between small" style="margin-top:14px"><span class="muted">판정: 과정별로 가장 좋은 결과(이수 &gt; 확인필요 &gt; 미이수 &gt; 불참) · 기록 없음은 '미참석' · 이수는 담당자 판정 변경 반영</span><span>확인자: 인사팀 ______________ (서명)</span></div>`;
   };
   render(); loadAll();
